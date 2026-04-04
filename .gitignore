@@ -1,0 +1,59 @@
+# -------------------------
+# PYTHON
+# -------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+*.log
+
+# Entornos virtuales
+venv/
+.env/
+.env.*
+
+# -------------------------
+# DATABASE
+# -------------------------
+*.db
+*.sqlite3
+
+# -------------------------
+# FILE STORAGE (IMÁGENES)
+# -------------------------
+storage/
+api/storage/
+worker/storage/
+
+# -------------------------
+# BATCHES / TEST FILES
+# -------------------------
+*.zip
+
+# -------------------------
+# OS FILES
+# -------------------------
+.DS_Store
+Thumbs.db
+
+# -------------------------
+# IDE / EDITORS
+# -------------------------
+.vscode/
+.idea/
+
+# -------------------------
+# DOCKER
+# -------------------------
+docker-data/
+*.pid
+
+# -------------------------
+# TEMP FILES
+# -------------------------
+*.tmp
+*.temp
+CLAUDE.md
+PROGRESS.md
