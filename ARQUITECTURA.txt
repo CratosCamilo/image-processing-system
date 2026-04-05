@@ -1,0 +1,406 @@
+================================================================================
+  SISTEMA DISTRIBUIDO DE PROCESAMIENTO DE IMÁGENES — ARQUITECTURA Y FLUJO
+================================================================================
+
+Este documento explica cómo funciona el sistema completo, componente por
+componente, desde que llega una solicitud HTTP hasta que el cliente puede
+descargar sus imágenes procesadas.
+
+--------------------------------------------------------------------------------
+1. VISIÓN GENERAL
+--------------------------------------------------------------------------------
+
+El sistema está compuesto por cuatro componentes principales que se comunican
+entre sí usando dos protocolos distintos:
+
+  [Cliente HTTP]
+       │
+       │  HTTP/REST (JSON + multipart/form-data)
+       ▼
+  [API — FastAPI]  ──────────────────────────────────────────┐
+       │                                                      │
+       │  SQL (SQLite, archivo local)                         │  AMQP 0-9-1
+       ▼                                                      ▼
+  [Base de datos — SQLite]                           [RabbitMQ — Broker]
+                                                             │
+                                                             │  AMQP 0-9-1
+                                                             ▼
+                                                    [Worker(s) — Pillow]
+                                                             │
+                                                             │  SQL (SQLite)
+                                                             ▼
+                                                    [Base de datos — SQLite]
+
+La API y los workers NO se hablan directamente entre sí. Todo pasa por
+RabbitMQ. Esto es el núcleo del diseño distribuido: los componentes están
+desacoplados y pueden escalar de forma independiente.
+
+--------------------------------------------------------------------------------
+2. COMPONENTE: API (FastAPI)
+--------------------------------------------------------------------------------
+
+Tecnología:  Python + FastAPI + Uvicorn
+Puerto:      8000 (por defecto)
+Protocolo de entrada: HTTP/1.1 — REST
+Protocolo de salida:  SQL sobre archivo local + AMQP hacia RabbitMQ
+
+La API es el único punto de entrada del sistema para el cliente. Expone tres
+operaciones principales:
+
+  POST /lote         → recibe un batch de imágenes + JSONs
+  GET  /lote/{id}    → consulta el estado del procesamiento
+  GET  /lote/{id}/resultado → descarga el ZIP con los resultados
+
+Adicionalmente:
+  GET  /info         → documentación de las transformaciones disponibles
+
+--- Cómo recibe el batch ---
+
+El cliente envía una solicitud HTTP POST con Content-Type: multipart/form-data.
+El cuerpo puede contener:
+
+  a) Archivos individuales: img1.jpg, img1.json, img2.png, img2.json, ...
+  b) Un único archivo ZIP que contiene esos mismos archivos
+
+Para cada imagen debe existir un JSON con el mismo nombre base. El JSON
+especifica qué transformaciones aplicar y en qué orden.
+
+Ejemplo del JSON de instrucciones:
+  {
+    "transformaciones": [
+      { "tipo": "resize", "width": 800, "height": 600 },
+      { "tipo": "blur", "radius": 1.5 },
+      { "tipo": "watermark", "text": "Demo", "position": "bottom-right", "opacity": 0.6 }
+    ]
+  }
+
+--- Qué hace la API al recibir el batch ---
+
+1. Valida que cada imagen tenga su JSON correspondiente.
+2. Abre cada imagen con PIL para leer su formato real (JPEG/PNG/TIFF) y
+   resolución (ej. "1920x1080"). Rechaza formatos no permitidos.
+3. Valida los parámetros de cada transformación (tipos, rangos, enums).
+4. Genera un UUID para el lote (id_lote) y uno para cada imagen (id_imagen).
+5. Guarda los archivos físicos en: api/storage/input/{id_lote}/
+6. Inserta los registros en SQLite: lote_procesamiento, imagen,
+   imagen_transformacion.
+7. Programa una tarea en background (BackgroundTask de Starlette) por cada
+   imagen para publicarla en RabbitMQ.
+8. Retorna inmediatamente HTTP 200 con el id_lote, SIN esperar el
+   procesamiento.
+
+Los pasos 1–6 son síncronos (se completan antes de responder).
+El paso 7 es asíncrono: la publicación en RabbitMQ ocurre DESPUÉS de que
+la respuesta HTTP ya fue enviada al cliente.
+
+--- Por qué es async la publicación ---
+
+FastAPI corre sobre un event loop de asyncio. La publicación en RabbitMQ
+usa aio-pika, que es un cliente RabbitMQ nativo para asyncio. La conexión
+vive en app.state.rabbit y se crea una sola vez al arrancar la API (startup
+via lifespan). Cada publicación abre un canal async, envía el mensaje, y
+cierra el canal — todo sin bloquear el event loop ni crear threads. Esto
+permite publicar 50 o 100 mensajes en rápida sucesión sin saturar el servidor.
+
+--------------------------------------------------------------------------------
+3. COMPONENTE: BASE DE DATOS (SQLite)
+--------------------------------------------------------------------------------
+
+Tecnología:  SQLite (archivo database.db en la raíz del proyecto)
+Protocolo:   Acceso directo por archivo (no hay servidor de BD)
+Accedida por: API y Workers de forma independiente
+
+SQLite es una base de datos embebida — no corre como proceso separado. Tanto
+la API como los workers abren conexiones directas al archivo database.db.
+Esto funciona porque SQLite maneja el locking a nivel de archivo, y los
+patrones de acceso del sistema (la API escribe al inicio, los workers leen
+y actualizan durante el procesamiento) raramente generan contención.
+
+--- Modelo de datos relevante ---
+
+lote_procesamiento    → un registro por batch enviado
+imagen                → un registro por imagen, con formato y resolución real
+imagen_transformacion → las transformaciones de cada imagen, en orden
+tarea_procesamiento   → creada por el worker cuando empieza a procesar
+resultado_procesamiento → creada por el worker al terminar (éxito o error)
+log_procesamiento     → trazabilidad detallada de cada paso
+nodo_worker           → registro de cada instancia de worker activa
+transformacion        → catálogo de los 11 tipos disponibles (seed fijo)
+estado_lote/tarea/resultado/nodo → catálogos de estados (FKs normalizadas)
+
+Los estados nunca se guardan como texto libre. Siempre son IDs (1=pendiente,
+2=procesando, 3=completado, 4=error) que referencian tablas de catálogo.
+
+--------------------------------------------------------------------------------
+4. COMPONENTE: RABBITMQ (Broker de mensajería)
+--------------------------------------------------------------------------------
+
+Tecnología:  RabbitMQ (proceso externo, servidor independiente)
+Puerto:      5672 (AMQP 0-9-1)
+Protocolo:   AMQP — Advanced Message Queuing Protocol
+Rol:         Intermediario (broker) entre la API (producer) y los workers (consumers)
+
+RabbitMQ NO tiene código propio en este proyecto. Es un servidor que corre
+de forma independiente. El proyecto se conecta a él usando dos clientes:
+  - aio-pika (desde la API, cliente async para asyncio)
+  - pika     (desde los workers, cliente bloqueante)
+
+--- Qué es una cola (queue) ---
+
+RabbitMQ mantiene una cola llamada "cola_imagenes". Una cola es simplemente
+una lista ordenada de mensajes pendientes de procesar. La API deposita
+mensajes en la cola; los workers los extraen uno a uno.
+
+La cola está declarada como durable=True, lo que significa que los mensajes
+sobreviven un reinicio de RabbitMQ (se persisten en disco).
+
+--- Cómo fluye un mensaje ---
+
+1. La API publica un mensaje JSON por imagen:
+   { "id_imagen": "...", "ruta": "storage/input/...", "id_lote": "..." }
+
+2. RabbitMQ guarda el mensaje en la cola "cola_imagenes".
+
+3. Un worker libre recibe el mensaje.
+
+4a. Si el worker procesa correctamente → envía ACK (acknowledgment).
+    RabbitMQ elimina el mensaje de la cola.
+
+4b. Si ocurre un error → envía NACK con requeue=False.
+    RabbitMQ descarta el mensaje (no lo reencola).
+
+--- Balanceo automático entre workers ---
+
+Cada worker se conecta a RabbitMQ con prefetch_count=1. Esto significa que
+RabbitMQ solo le entrega UN mensaje a la vez a cada worker, y no le envía
+el siguiente hasta que el worker haga ACK del anterior. Con varios workers
+conectados, RabbitMQ distribuye los mensajes automáticamente al worker que
+esté libre — sin ningún código de coordinación adicional.
+
+Ejemplo con 3 workers y 9 imágenes:
+  - Worker A recibe imagen 1, Worker B recibe imagen 2, Worker C imagen 3
+  - Si Worker B termina primero, recibe imagen 4
+  - Si Worker A tarda más, Worker B y C siguen procesando imágenes 4, 5, 6...
+  - Worker A recibe imagen 7 cuando termina imagen 1
+
+El sistema se balancea solo según la capacidad real de cada nodo.
+
+--- Por qué RabbitMQ y no una llamada directa ---
+
+Si la API llamara directamente a los workers (ej. via HTTP), tendría que
+saber cuántos workers hay, cuáles están disponibles, y cuál tiene capacidad.
+Con RabbitMQ, la API no sabe nada de los workers — simplemente deposita
+mensajes. Los workers no saben nada de la API — simplemente consumen mensajes.
+Esto permite agregar o quitar workers en caliente sin tocar la API.
+
+--------------------------------------------------------------------------------
+5. COMPONENTE: WORKER (Procesamiento de imágenes)
+--------------------------------------------------------------------------------
+
+Tecnología:  Python + pika (AMQP bloqueante) + Pillow (procesamiento de imagen)
+Protocolo de entrada:  AMQP (consume de RabbitMQ)
+Protocolo de salida:   SQL (escribe en SQLite) + archivos en disco
+
+Cada worker es un proceso Python independiente. Se puede lanzar N instancias
+en la misma máquina o en máquinas distintas — siempre que todas puedan
+acceder a RabbitMQ, a SQLite y al directorio de storage.
+
+--- Modelo de ejecución del worker ---
+
+El worker usa pika.BlockingConnection con channel.start_consuming(). Esto
+significa que el proceso queda bloqueado en un loop infinito esperando
+mensajes. Cuando llega uno, se ejecuta el callback on_message en el mismo
+hilo. El worker NO usa threads ni async — es un proceso secuencial de un solo
+hilo. Procesa una imagen completamente antes de recibir la siguiente
+(garantizado por prefetch_count=1).
+
+--- Qué hace el worker al recibir un mensaje ---
+
+1. Deserializa el JSON del mensaje (id_imagen, ruta, id_lote).
+2. Actualiza el estado de la imagen a "procesando" en SQLite.
+3. Crea un registro en tarea_procesamiento (queda trackeado con su id_nodo).
+4. Lee de SQLite las transformaciones de esa imagen, ordenadas por
+   orden_aplicacion.
+5. Registra en log_procesamiento el evento "procesando" con la descripción
+   de los pasos: "resize(800x600) → blur(r=1.5) → watermark('Demo', bottom-right)"
+6. Abre la imagen con Pillow y aplica cada transformación en orden.
+7. Guarda la imagen resultante en storage/output/{id_lote}/
+   (la extensión del archivo depende de si hay una transformación "convert").
+8. Actualiza imagen y tarea_procesamiento a estado "completado".
+9. Inserta resultado_procesamiento con la ruta del archivo de salida.
+10. Registra en log_procesamiento el evento "completado".
+11. Comprueba si todas las imágenes del lote están completadas. Si es así,
+    actualiza lote_procesamiento a "completado" y borra el directorio
+    storage/input/{id_lote}/ (limpieza automática).
+12. Envía ACK a RabbitMQ.
+
+Si ocurre cualquier error en pasos 2–11:
+- Actualiza imagen y tarea a estado "error".
+- Registra en log_procesamiento el evento "error" con el mensaje de la excepción.
+- Envía NACK a RabbitMQ (sin reencolar).
+
+--- Las 11 transformaciones ---
+
+resize      → Redimensiona con filtro LANCZOS (alta calidad)
+grayscale   → Convierte a escala de grises
+rotate      → Rota con expand=True (sin recortar esquinas)
+crop        → Recorta región rectangular (valida límites en runtime)
+flip        → Refleja horizontal o verticalmente
+blur        → Desenfoque gaussiano (GaussianBlur)
+sharpen     → Aumenta nitidez (ImageEnhance.Sharpness)
+brightness  → Ajusta brillo (ImageEnhance.Brightness)
+contrast    → Ajusta contraste (ImageEnhance.Contrast)
+watermark   → Texto superpuesto con opacidad (alpha_composite RGBA)
+convert     → Cambia formato de salida: jpeg / png / tiff
+
+Las transformaciones se aplican en cadena sobre el mismo objeto Image de
+Pillow. El resultado final se guarda una sola vez al terminar el pipeline.
+
+--------------------------------------------------------------------------------
+6. FLUJO COMPLETO DE EXTREMO A EXTREMO
+--------------------------------------------------------------------------------
+
+FASE 1 — INGESTA (API, síncrona, ~100ms)
+
+  Cliente → POST /lote (multipart/form-data con imágenes + JSONs)
+      │
+      ├─ Validación de formato PIL (JPEG/PNG/TIFF)
+      ├─ Validación de parámetros de transformaciones
+      ├─ Escritura en storage/input/{id_lote}/
+      ├─ INSERT en SQLite: lote, imágenes, transformaciones
+      └─ Respuesta HTTP 200: { "id_lote": "...", "estado": "procesando" }
+
+FASE 2 — ENCOLADO (API → RabbitMQ, async post-respuesta)
+
+  BackgroundTask por cada imagen (async, no bloquea al cliente):
+      │
+      ├─ aio-pika abre canal async
+      ├─ Publica mensaje JSON: { id_imagen, ruta, id_lote }
+      └─ Cierra canal
+
+FASE 3 — PROCESAMIENTO (RabbitMQ → Worker, paralelo)
+
+  Worker libre recibe mensaje de RabbitMQ:
+      │
+      ├─ Lee transformaciones de SQLite (ORDER BY orden_aplicacion)
+      ├─ Aplica pipeline Pillow (11 transformaciones posibles)
+      ├─ Guarda resultado en storage/output/{id_lote}/
+      ├─ Actualiza SQLite: imagen, tarea, resultado, logs
+      ├─ Si último del lote: actualiza lote a "completado", limpia input/
+      └─ ACK → RabbitMQ elimina el mensaje
+
+FASE 4 — CONSULTA DE ESTADO (cliente → API → SQLite)
+
+  Cliente → GET /lote/{id_lote}
+      │
+      ├─ SELECT con JOIN a estado_lote
+      ├─ COUNT de tareas completadas vs total imágenes
+      └─ Respuesta: { estado, total, completadas, progreso% }
+
+FASE 5 — DESCARGA (cliente → API → disco)
+
+  Cliente → GET /lote/{id_lote}/resultado  (solo si estado = "completado")
+      │
+      ├─ Comprime storage/output/{id_lote}/ en un ZIP en memoria/disco
+      ├─ FileResponse → stream del ZIP al cliente
+      └─ BackgroundTask: borra output/{id_lote}/ y el ZIP temporal
+
+--------------------------------------------------------------------------------
+7. CONTRATOS ENTRE COMPONENTES
+--------------------------------------------------------------------------------
+
+--- Contrato API → RabbitMQ (mensaje publicado) ---
+
+  Cada mensaje es un JSON con exactamente estos campos:
+  {
+    "id_imagen": "<UUID>",
+    "ruta":      "storage/input/{id_lote}/{nombre_archivo}",
+    "id_lote":   "<UUID>"
+  }
+
+  La ruta es relativa al directorio api/. El worker la convierte a
+  absoluta sumando PROJECT_ROOT/api/.
+
+--- Contrato RabbitMQ → Worker (mismo mensaje) ---
+
+  El worker espera exactamente los tres campos anteriores.
+  Si falta alguno o el JSON es inválido → KeyError → NACK.
+
+--- Contrato API → SQLite (datos que el worker necesita leer) ---
+
+  Antes de publicar el mensaje en RabbitMQ, la API garantiza que en SQLite
+  ya existen:
+  - El registro imagen con id_imagen
+  - Los registros imagen_transformacion con sus parametros_json y orden_aplicacion
+
+  El worker asume que esta data está disponible cuando recibe el mensaje.
+  Si no estuviera (race condition teórico con lotes enormes), el worker
+  obtendría una lista vacía de transformaciones y procesaría la imagen sin
+  cambios.
+
+--- Contrato Worker → SQLite (estados que la API lee) ---
+
+  El worker escribe los estados usando los mismos IDs de catálogo que la API:
+    pendiente=1, procesando=2, completado=3, error=4
+
+  La API lee estos estados con JOINs a las tablas de catálogo para mostrar
+  nombres legibles ("completado" en lugar de 3).
+
+--------------------------------------------------------------------------------
+8. ESCALABILIDAD Y DISTRIBUCIÓN
+--------------------------------------------------------------------------------
+
+--- Escalar workers ---
+
+Para procesar más imágenes en paralelo, se lanzan más instancias de worker.py.
+Cada una se identifica con un ID único (hostname-uuid6) y se registra en
+nodo_worker. RabbitMQ distribuye automáticamente los mensajes entre todas las
+instancias activas gracias a prefetch_count=1.
+
+Workers en la misma máquina: comparten CPU, RAM y disco. El paralelismo es
+real si hay múltiples cores (cada worker es un proceso separado, no un thread,
+por lo que no hay GIL de Python).
+
+Workers en máquinas distintas: cada máquina aporta sus propios recursos.
+Los requisitos son: acceso a RabbitMQ (localhost:5672 o IP remota), acceso
+al mismo storage compartido (NFS, volumen compartido, o similar), y acceso
+al mismo database.db. En una arquitectura real esto requeriría storage y BD
+en red, pero para el entorno actual (una sola máquina) no aplica.
+
+--- Cuello de botella actual ---
+
+Con la arquitectura presente (una máquina), el cuello de botella es el disco:
+todos los workers leen de storage/input y escriben en storage/output sobre
+el mismo disco físico. Con lotes grandes (50+ imágenes), múltiples workers
+compiten por I/O de disco simultáneamente. Aumentar workers más allá del
+número de cores no mejora el throughput si el disco está saturado.
+
+--- Por qué SQLite y no PostgreSQL ---
+
+SQLite es suficiente para el volumen actual y evita la complejidad de un
+servidor de BD adicional. La limitación es que SQLite tiene locking a nivel
+de archivo: múltiples writers concurrentes se serializan. Con muchos workers
+actualizando estados simultáneamente podría convertirse en un cuello de botella,
+pero para el alcance del proyecto es completamente adecuado.
+
+--------------------------------------------------------------------------------
+9. HERRAMIENTAS DE PRUEBA
+--------------------------------------------------------------------------------
+
+generarbatch.py (raíz) y scripts/generarbatch.py:
+  - Genera N imágenes descargadas de picsum.photos
+  - Asigna entre 1 y 5 transformaciones aleatorias por imagen
+  - Respeta el orden lógico: crop → resize → flip/rotate → brightness/contrast
+    → blur/sharpen → watermark → convert
+  - Empaqueta todo en lote.zip listo para enviar a POST /lote
+
+Uso:
+  python generarbatch.py 10       → genera 10 imágenes en lote.zip
+  python scripts/generarbatch.py 10  → ídem (versión alternativa)
+
+Luego:
+  curl -X POST http://localhost:8000/lote -F "archivos=@lote.zip"
+
+================================================================================
+  FIN DEL DOCUMENTO
+================================================================================

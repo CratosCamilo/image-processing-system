@@ -116,6 +116,22 @@ INSERT OR IGNORE INTO transformacion (id_transformacion, tipo, descripcion)
     VALUES (2, 'grayscale', 'Convertir imagen a escala de grises');
 INSERT OR IGNORE INTO transformacion (id_transformacion, tipo, descripcion)
     VALUES (3, 'rotate', 'Rotar imagen N grados');
+INSERT OR IGNORE INTO transformacion (id_transformacion, tipo, descripcion)
+    VALUES (4, 'crop', 'Recortar región rectangular de la imagen');
+INSERT OR IGNORE INTO transformacion (id_transformacion, tipo, descripcion)
+    VALUES (5, 'flip', 'Reflejar imagen horizontal o verticalmente');
+INSERT OR IGNORE INTO transformacion (id_transformacion, tipo, descripcion)
+    VALUES (6, 'blur', 'Aplicar desenfoque gaussiano');
+INSERT OR IGNORE INTO transformacion (id_transformacion, tipo, descripcion)
+    VALUES (7, 'sharpen', 'Aumentar nitidez de la imagen');
+INSERT OR IGNORE INTO transformacion (id_transformacion, tipo, descripcion)
+    VALUES (8, 'brightness', 'Ajustar brillo de la imagen');
+INSERT OR IGNORE INTO transformacion (id_transformacion, tipo, descripcion)
+    VALUES (9, 'contrast', 'Ajustar contraste de la imagen');
+INSERT OR IGNORE INTO transformacion (id_transformacion, tipo, descripcion)
+    VALUES (10, 'watermark', 'Añadir texto como marca de agua');
+INSERT OR IGNORE INTO transformacion (id_transformacion, tipo, descripcion)
+    VALUES (11, 'convert', 'Convertir formato de salida (jpeg, png, tiff)');
 """
 
 # Migraciones para instalaciones existentes (sin las nuevas columnas FK)

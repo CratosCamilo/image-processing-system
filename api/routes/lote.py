@@ -5,7 +5,7 @@ import zipfile
 from io import BytesIO
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from PIL import Image
 from typing import List
@@ -119,9 +119,17 @@ foto2.png →  foto2.json
 ```json
 {
   "transformaciones": [
-    { "tipo": "resize", "width": 800, "height": 600 },
+    { "tipo": "crop",       "x": 0, "y": 0, "width": 640, "height": 480 },
+    { "tipo": "resize",     "width": 800, "height": 600 },
+    { "tipo": "rotate",     "angle": 90 },
+    { "tipo": "flip",       "direction": "horizontal" },
+    { "tipo": "brightness", "factor": 1.3 },
+    { "tipo": "contrast",   "factor": 1.5 },
+    { "tipo": "blur",       "radius": 2.0 },
+    { "tipo": "sharpen",    "factor": 2.0 },
     { "tipo": "grayscale" },
-    { "tipo": "rotate", "angle": 90 }
+    { "tipo": "watermark",  "text": "Confidencial", "position": "bottom-right", "opacity": 0.6 },
+    { "tipo": "convert",    "format": "png" }
   ]
 }
 ```
@@ -130,15 +138,34 @@ foto2.png →  foto2.json
 
 **Transformaciones soportadas**
 
-| Tipo        | Parámetros requeridos         |
-|-------------|-------------------------------|
-| `resize`    | `width` (int), `height` (int) |
-| `grayscale` | _(sin parámetros)_            |
-| `rotate`    | `angle` (float, grados)       |
+| Tipo         | Parámetros requeridos                                                        |
+|--------------|------------------------------------------------------------------------------|
+| `resize`     | `width` (int), `height` (int)                                                |
+| `grayscale`  | _(sin parámetros)_                                                           |
+| `rotate`     | `angle` (float, grados — sentido antihorario)                                |
+| `crop`       | `x` (int), `y` (int), `width` (int), `height` (int) — en píxeles           |
+| `flip`       | `direction`: `"horizontal"` \\| `"vertical"`                                 |
+| `blur`       | `radius` (float ≥ 0.1)                                                       |
+| `sharpen`    | `factor` (float ≥ 1.0 — 1.0 = sin cambio)                                  |
+| `brightness` | `factor` (float > 0.0 — 1.0 = sin cambio, > 1.0 = más brillo)              |
+| `contrast`   | `factor` (float > 0.0 — 1.0 = sin cambio, > 1.0 = más contraste)           |
+| `watermark`  | `text` (str), `position` (ver abajo), `opacity` (float 0.0–1.0)             |
+| `convert`    | `format`: `"jpeg"` \\| `"png"` \\| `"tiff"` — cambia el formato de salida   |
+
+Posiciones válidas para `watermark.position`:
+`"top-left"`, `"top-right"`, `"bottom-left"`, `"bottom-right"`, `"center"`
 
 ---
 
-**Formatos de imagen permitidos:** JPEG, PNG, TIFF
+**Orden recomendado:** `crop → resize → flip/rotate → brightness/contrast → blur/sharpen → watermark → convert`
+
+Si se incluye `convert`, debe ir al **final** de la lista.
+
+---
+
+**Formatos de imagen de entrada permitidos:** JPEG, PNG, TIFF
+
+**Formatos de salida por defecto:** JPEG (usar `convert` para cambiar)
 
 ---
 
@@ -147,6 +174,7 @@ foto2.png →  foto2.json
 1. `POST /lote` — subir batch → retorna `id_lote`
 2. `GET /lote/{id_lote}` — consultar estado y progreso
 3. `GET /lote/{id_lote}/resultado` — descargar ZIP con imágenes procesadas
+4. `GET /info` — ver transformaciones disponibles con ejemplos
 """
 
 
@@ -156,7 +184,7 @@ foto2.png →  foto2.json
     summary="Crear lote de procesamiento",
     description=_DESCRIPCION_POST_LOTE,
 )
-async def crear_lote(background_tasks: BackgroundTasks, archivos: List[UploadFile] = File(...)):
+async def crear_lote(request: Request, background_tasks: BackgroundTasks, archivos: List[UploadFile] = File(...)):
     for f in archivos:
         if not f.filename:
             raise HTTPException(status_code=400, detail="Archivo sin nombre detectado")
@@ -237,6 +265,7 @@ async def crear_lote(background_tasks: BackgroundTasks, archivos: List[UploadFil
 
         background_tasks.add_task(
             publicar_tarea,
+            request.app.state.rabbit,
             {"id_imagen": id_imagen, "ruta": ruta_img, "id_lote": id_lote},
         )
 
@@ -311,30 +340,100 @@ async def info():
                 "tipo": "resize",
                 "descripcion": "Redimensionar imagen al ancho y alto indicados",
                 "parametros": {"width": "int — ancho en píxeles", "height": "int — alto en píxeles"},
+                "ejemplo": {"tipo": "resize", "width": 800, "height": 600},
             },
             {
                 "tipo": "grayscale",
                 "descripcion": "Convertir imagen a escala de grises",
                 "parametros": {},
+                "ejemplo": {"tipo": "grayscale"},
             },
             {
                 "tipo": "rotate",
                 "descripcion": "Rotar imagen N grados en sentido antihorario",
                 "parametros": {"angle": "float — grados de rotación"},
+                "ejemplo": {"tipo": "rotate", "angle": 90},
+            },
+            {
+                "tipo": "crop",
+                "descripcion": "Recortar una región rectangular de la imagen",
+                "parametros": {
+                    "x": "int — coordenada X de inicio (píxeles desde la izquierda)",
+                    "y": "int — coordenada Y de inicio (píxeles desde arriba)",
+                    "width": "int — ancho del recorte en píxeles",
+                    "height": "int — alto del recorte en píxeles",
+                },
+                "ejemplo": {"tipo": "crop", "x": 100, "y": 50, "width": 640, "height": 480},
+            },
+            {
+                "tipo": "flip",
+                "descripcion": "Reflejar la imagen horizontal o verticalmente",
+                "parametros": {"direction": "string — 'horizontal' | 'vertical'"},
+                "ejemplo": {"tipo": "flip", "direction": "horizontal"},
+            },
+            {
+                "tipo": "blur",
+                "descripcion": "Aplicar desenfoque gaussiano",
+                "parametros": {"radius": "float ≥ 0.1 — radio del desenfoque"},
+                "ejemplo": {"tipo": "blur", "radius": 2.0},
+            },
+            {
+                "tipo": "sharpen",
+                "descripcion": "Aumentar la nitidez de la imagen",
+                "parametros": {"factor": "float ≥ 1.0 — intensidad (1.0 = sin cambio)"},
+                "ejemplo": {"tipo": "sharpen", "factor": 2.0},
+            },
+            {
+                "tipo": "brightness",
+                "descripcion": "Ajustar el brillo de la imagen",
+                "parametros": {"factor": "float > 0.0 — multiplicador (1.0 = sin cambio, > 1.0 = más brillo)"},
+                "ejemplo": {"tipo": "brightness", "factor": 1.3},
+            },
+            {
+                "tipo": "contrast",
+                "descripcion": "Ajustar el contraste de la imagen",
+                "parametros": {"factor": "float > 0.0 — multiplicador (1.0 = sin cambio, > 1.0 = más contraste)"},
+                "ejemplo": {"tipo": "contrast", "factor": 1.5},
+            },
+            {
+                "tipo": "watermark",
+                "descripcion": "Añadir texto como marca de agua con opacidad configurable",
+                "parametros": {
+                    "text": "string — texto de la marca de agua",
+                    "position": "string — 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'center'",
+                    "opacity": "float 0.0–1.0 — opacidad del texto",
+                },
+                "ejemplo": {"tipo": "watermark", "text": "Confidencial", "position": "bottom-right", "opacity": 0.6},
+            },
+            {
+                "tipo": "convert",
+                "descripcion": "Convertir el formato del archivo de salida. Debe ir al final de la lista.",
+                "parametros": {"format": "string — 'jpeg' | 'png' | 'tiff'"},
+                "ejemplo": {"tipo": "convert", "format": "png"},
             },
         ],
-        "formatos_permitidos": sorted(FORMATOS_PERMITIDOS),
-        "ejemplo_json": {
+        "formatos_entrada_permitidos": sorted(FORMATOS_PERMITIDOS),
+        "formato_salida_defecto": "jpeg",
+        "ejemplo_json_completo": {
             "transformaciones": [
-                {"tipo": "resize", "width": 800, "height": 600},
-                {"tipo": "grayscale"},
-                {"tipo": "rotate", "angle": 90},
+                {"tipo": "crop", "x": 0, "y": 0, "width": 800, "height": 600},
+                {"tipo": "resize", "width": 640, "height": 480},
+                {"tipo": "brightness", "factor": 1.2},
+                {"tipo": "blur", "radius": 1.5},
+                {"tipo": "watermark", "text": "Muestra", "position": "bottom-right", "opacity": 0.5},
+                {"tipo": "convert", "format": "png"},
             ]
         },
+        "orden_recomendado": [
+            "crop", "resize", "flip / rotate",
+            "brightness / contrast", "blur / sharpen",
+            "watermark", "convert (siempre al final)"
+        ],
         "flujo": [
             "POST /lote — subir imágenes y JSONs (individuales o en ZIP) → retorna id_lote",
             "GET /lote/{id_lote} — consultar estado y progreso del procesamiento",
             "GET /lote/{id_lote}/resultado — descargar ZIP con imágenes procesadas",
+            "GET /info — ver esta documentación",
         ],
     }
 

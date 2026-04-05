@@ -7,7 +7,73 @@ from db.database import get_connection
 ESTADO_LOTE_ID      = {"pendiente": 1, "procesando": 2, "completado": 3, "error": 4}
 ESTADO_TAREA_ID     = {"pendiente": 1, "procesando": 2, "completado": 3, "error": 4}
 ESTADO_RESULTADO_ID = {"pendiente": 1, "generado": 2, "error": 3}
-TRANSFORMACION_TIPO_ID = {"resize": 1, "grayscale": 2, "rotate": 3}
+TRANSFORMACION_TIPO_ID = {
+    "resize": 1, "grayscale": 2, "rotate": 3,
+    "crop": 4, "flip": 5, "blur": 6, "sharpen": 7,
+    "brightness": 8, "contrast": 9, "watermark": 10, "convert": 11,
+}
+
+# ------------------------------------------------- validadores de parámetros
+
+_POSICIONES_WATERMARK = {"top-left", "top-right", "bottom-left", "bottom-right", "center"}
+
+
+def _req_int(p: dict, key: str) -> None:
+    if key not in p:
+        raise ValueError(f"Falta parámetro requerido: '{key}'")
+    if not isinstance(p[key], int):
+        raise ValueError(f"El parámetro '{key}' debe ser un entero, recibido: {type(p[key]).__name__}")
+
+
+def _req_float(p: dict, key: str) -> None:
+    if key not in p:
+        raise ValueError(f"Falta parámetro requerido: '{key}'")
+    if not isinstance(p[key], (int, float)):
+        raise ValueError(f"El parámetro '{key}' debe ser numérico, recibido: {type(p[key]).__name__}")
+
+
+def _req_float_min(p: dict, key: str, min_val: float) -> None:
+    _req_float(p, key)
+    if p[key] < min_val:
+        raise ValueError(f"El parámetro '{key}' debe ser ≥ {min_val}, recibido: {p[key]}")
+
+
+def _req_float_range(p: dict, key: str, lo: float, hi: float) -> None:
+    _req_float(p, key)
+    if not (lo <= p[key] <= hi):
+        raise ValueError(f"El parámetro '{key}' debe estar en [{lo}, {hi}], recibido: {p[key]}")
+
+
+def _req_str(p: dict, key: str) -> None:
+    if key not in p:
+        raise ValueError(f"Falta parámetro requerido: '{key}'")
+    if not isinstance(p[key], str) or not p[key].strip():
+        raise ValueError(f"El parámetro '{key}' debe ser un string no vacío")
+
+
+def _req_enum(p: dict, key: str, allowed: set) -> None:
+    if key not in p:
+        raise ValueError(f"Falta parámetro requerido: '{key}'")
+    if p[key] not in allowed:
+        raise ValueError(f"El parámetro '{key}' debe ser uno de {sorted(allowed)}, recibido: '{p[key]}'")
+
+
+_VALIDADORES = {
+    "resize":     lambda p: (_req_int(p, "width"),   _req_int(p, "height")),
+    "grayscale":  lambda p: None,
+    "rotate":     lambda p: _req_float(p, "angle"),
+    "crop":       lambda p: (_req_int(p, "x"),       _req_int(p, "y"),
+                             _req_int(p, "width"),   _req_int(p, "height")),
+    "flip":       lambda p: _req_enum(p, "direction", {"horizontal", "vertical"}),
+    "blur":       lambda p: _req_float_min(p, "radius", 0.1),
+    "sharpen":    lambda p: _req_float_min(p, "factor", 1.0),
+    "brightness": lambda p: _req_float_min(p, "factor", 0.1),
+    "contrast":   lambda p: _req_float_min(p, "factor", 0.1),
+    "watermark":  lambda p: (_req_str(p, "text"),
+                             _req_enum(p, "position", _POSICIONES_WATERMARK),
+                             _req_float_range(p, "opacity", 0.0, 1.0)),
+    "convert":    lambda p: _req_enum(p, "format", {"jpeg", "png", "tiff"}),
+}
 
 
 class PersistenceService:
@@ -24,7 +90,6 @@ class PersistenceService:
             )
 
     def obtener_lote(self, id_lote: str) -> dict | None:
-        """Retorna el lote con 'estado' como nombre legible (JOIN con estado_lote)."""
         with get_connection() as conn:
             row = conn.execute(
                 """SELECT lp.id_lote, lp.fecha_creacion, lp.id_estado_lote,
@@ -41,8 +106,6 @@ class PersistenceService:
             total = conn.execute(
                 "SELECT COUNT(*) FROM imagen WHERE id_lote = ?", (id_lote,)
             ).fetchone()[0]
-            # imagen siempre tiene todas las filas desde el inicio → fuente de verdad para total
-            # tarea_procesamiento solo existe cuando el worker la crea → usar para completadas
             tareas_existentes = conn.execute(
                 "SELECT COUNT(*) FROM tarea_procesamiento WHERE id_lote = ?", (id_lote,)
             ).fetchone()[0]
@@ -96,6 +159,12 @@ class PersistenceService:
                         f"Transformación no soportada: '{tipo}'. "
                         f"Válidas: {list(TRANSFORMACION_TIPO_ID)}"
                     )
+                # Validar parámetros requeridos por tipo
+                try:
+                    _VALIDADORES[tipo](transformacion)
+                except ValueError as e:
+                    raise ValueError(f"Error en transformación '{tipo}' (posición {orden}): {e}")
+
                 conn.execute(
                     """INSERT INTO imagen_transformacion
                        (id_imagen, orden_aplicacion, parametros_json, id_transformacion)
@@ -104,9 +173,6 @@ class PersistenceService:
                 )
 
     # ------------------------------------------------- tarea_procesamiento
-    # Nota: las tareas se crean directamente en estado "procesando" porque
-    # RabbitMQ ya actúa como cola — el worker solo recibe la tarea cuando
-    # está listo para procesarla. No existe un estado "pendiente" en tarea.
 
     def crear_tarea(self, id_lote: str, id_imagen: str, id_nodo: str) -> int:
         with get_connection() as conn:

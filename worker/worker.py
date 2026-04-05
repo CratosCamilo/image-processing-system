@@ -2,6 +2,7 @@ import json
 import shutil
 import socket
 import sqlite3
+import traceback
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -21,7 +22,11 @@ WORKER_ID = f"{socket.gethostname()}-{str(uuid.uuid4())[:6]}"
 # IDs de estado (deben coincidir con seed de database.py)
 ESTADO_TAREA_ID     = {"pendiente": 1, "procesando": 2, "completado": 3, "error": 4}
 ESTADO_RESULTADO_ID = {"pendiente": 1, "generado": 2, "error": 3}
-TRANSFORMACION_TIPO_ID = {"resize": 1, "grayscale": 2, "rotate": 3}
+TRANSFORMACION_TIPO_ID = {
+    "resize": 1, "grayscale": 2, "rotate": 3,
+    "crop": 4, "flip": 5, "blur": 6, "sharpen": 7,
+    "brightness": 8, "contrast": 9, "watermark": 10, "convert": 11,
+}
 
 
 def get_connection() -> sqlite3.Connection:
@@ -32,15 +37,56 @@ def get_connection() -> sqlite3.Connection:
 
 # --------------------------------------------------------- nodo
 
+ESTADO_NODO_ID = {"activo": 1, "inactivo": 2}
+
+
 def registrar_nodo(conn: sqlite3.Connection) -> None:
     conn.execute(
-        "INSERT OR IGNORE INTO nodo_worker (id_nodo, hostname, capacidad, id_estado_nodo) VALUES (?, ?, ?, ?)",
-        (WORKER_ID, socket.gethostname(), 1, 1),
+        """INSERT INTO nodo_worker (id_nodo, hostname, capacidad, id_estado_nodo)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(id_nodo) DO UPDATE SET id_estado_nodo = excluded.id_estado_nodo""",
+        (WORKER_ID, socket.gethostname(), 1, ESTADO_NODO_ID["activo"]),
+    )
+    conn.commit()
+
+
+def desregistrar_nodo(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "UPDATE nodo_worker SET id_estado_nodo = ? WHERE id_nodo = ?",
+        (ESTADO_NODO_ID["inactivo"], WORKER_ID),
     )
     conn.commit()
 
 
 # --------------------------------------------------------- log
+
+def _describir_transformacion(t: dict) -> str:
+    tipo = t.get("tipo", "?")
+    if tipo == "resize":
+        return f"resize({t.get('width')}x{t.get('height')})"
+    if tipo == "grayscale":
+        return "grayscale"
+    if tipo == "rotate":
+        return f"rotate({t.get('angle')}°)"
+    if tipo == "crop":
+        return f"crop({t.get('x')},{t.get('y')} → {t.get('width')}x{t.get('height')})"
+    if tipo == "flip":
+        return f"flip({t.get('direction')})"
+    if tipo == "blur":
+        return f"blur(r={t.get('radius')})"
+    if tipo == "sharpen":
+        return f"sharpen(f={t.get('factor')})"
+    if tipo == "brightness":
+        return f"brightness(f={t.get('factor')})"
+    if tipo == "contrast":
+        return f"contrast(f={t.get('factor')})"
+    if tipo == "watermark":
+        texto = str(t.get("text", ""))[:20]
+        return f"watermark('{texto}', {t.get('position')})"
+    if tipo == "convert":
+        return f"convert({t.get('format')})"
+    return tipo
+
 
 def registrar_log(
     conn: sqlite3.Connection,
@@ -120,7 +166,6 @@ def insertar_resultado(
 # --------------------------------------------------------- lote
 
 def actualizar_estado_lote_si_completo(conn: sqlite3.Connection, id_lote: str) -> bool:
-    # imagen tiene todas las filas desde el inicio → fuente de verdad para "pendientes"
     pendientes = conn.execute(
         "SELECT COUNT(*) FROM imagen WHERE id_lote = ? AND id_estado_tarea != ?",
         (id_lote, ESTADO_TAREA_ID["completado"]),
@@ -164,17 +209,17 @@ def on_message(ch, method, _properties, body):
         actualizar_estado_imagen(db, id_imagen, "procesando")
         id_tarea = crear_tarea_procesamiento(db, id_lote, id_imagen, WORKER_ID)
 
-        # Obtener transformaciones antes del log para incluirlas en la descripción
         transformaciones = obtener_transformaciones(db, id_imagen)
 
-        tipos = [t.get("tipo", "") for t in transformaciones]
-        for tipo in tipos:
+        for t in transformaciones:
+            tipo = t.get("tipo", "")
             if tipo not in TRANSFORMACION_TIPO_ID:
-                raise ValueError(f"Transformación no soportada: {tipo}")
+                raise ValueError(f"Transformación no soportada: '{tipo}'")
 
+        descripcion_pasos = " → ".join(_describir_transformacion(t) for t in transformaciones)
         registrar_log(
             db, id_imagen, WORKER_ID, "procesando",
-            f"Transformaciones: {', '.join(tipos)}",
+            f"Transformaciones: {descripcion_pasos}",
             id_lote=id_lote, id_tarea=id_tarea,
         )
 
@@ -198,6 +243,7 @@ def on_message(ch, method, _properties, body):
 
     except Exception as e:
         print(f"[Worker:{WORKER_ID}] Error: {e}")
+        traceback.print_exc()
         if id_imagen:
             actualizar_estado_imagen(db, id_imagen, "error")
             registrar_log(
@@ -230,4 +276,9 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print(f"\n[Worker:{WORKER_ID}] Detenido.")
         channel.stop_consuming()
-    connection.close()
+    finally:
+        connection.close()
+        db = get_connection()
+        desregistrar_nodo(db)
+        db.close()
+        print(f"[Worker:{WORKER_ID}] Nodo marcado como inactivo en BD.")
