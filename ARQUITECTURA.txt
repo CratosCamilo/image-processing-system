@@ -10,7 +10,7 @@ descargar sus imágenes procesadas.
 1. VISIÓN GENERAL
 --------------------------------------------------------------------------------
 
-El sistema está compuesto por cuatro componentes principales que se comunican
+El sistema está compuesto por cinco componentes principales que se comunican
 entre sí usando dos protocolos distintos:
 
   [Cliente HTTP]
@@ -19,21 +19,33 @@ entre sí usando dos protocolos distintos:
        ▼
   [API — FastAPI]  ──────────────────────────────────────────┐
        │                                                      │
-       │  SQL (SQLite, archivo local)                         │  AMQP 0-9-1
+       │  SQL (PostgreSQL, servidor en red)                   │  AMQP 0-9-1
        ▼                                                      ▼
-  [Base de datos — SQLite]                           [RabbitMQ — Broker]
-                                                             │
-                                                             │  AMQP 0-9-1
-                                                             ▼
-                                                    [Worker(s) — Pillow]
-                                                             │
-                                                             │  SQL (SQLite)
-                                                             ▼
-                                                    [Base de datos — SQLite]
+  [Base de datos — PostgreSQL]                       [RabbitMQ — Broker]
+       ▲                                                      │
+       │  SQL (PostgreSQL)                                    │  AMQP 0-9-1
+       │                                                      ▼
+       └──────────────────────────────────────────  [Worker(s) — Pillow]
+                                                    (N hilos por proceso)
 
 La API y los workers NO se hablan directamente entre sí. Todo pasa por
-RabbitMQ. Esto es el núcleo del diseño distribuido: los componentes están
-desacoplados y pueden escalar de forma independiente.
+RabbitMQ. La base de datos es un servidor compartido al que tanto la API
+como los workers se conectan de forma independiente por red.
+
+--- Arquitectura de deploy en VMs ---
+
+  VM 1 — API FastAPI
+  VM 2 — Worker nodo 1  (N hilos por ThreadPoolExecutor)
+  VM 3 — Worker nodo 2  (N hilos por ThreadPoolExecutor)
+  VM 4 — PostgreSQL     (servidor nativo, sin Docker)
+  Host  — RabbitMQ      (Docker en el PC físico anfitrión)
+
+  Red: adaptador puente (bridged) en VirtualBox — cada VM obtiene
+  su propia IP del router y se ven entre sí directamente.
+
+  Variables de entorno por componente:
+    API y Workers → DATABASE_URL=postgresql://admin:admin123@<IP-VM4>:5432/image_processing
+    Workers       → RABBITMQ_HOST=<IP-host>, N_WORKERS=<cores-de-la-VM>
 
 --------------------------------------------------------------------------------
 2. COMPONENTE: API (FastAPI)
@@ -42,7 +54,7 @@ desacoplados y pueden escalar de forma independiente.
 Tecnología:  Python + FastAPI + Uvicorn
 Puerto:      8000 (por defecto)
 Protocolo de entrada: HTTP/1.1 — REST
-Protocolo de salida:  SQL sobre archivo local + AMQP hacia RabbitMQ
+Protocolo de salida:  SQL sobre red (PostgreSQL) + AMQP hacia RabbitMQ
 
 La API es el único punto de entrada del sistema para el cliente. Expone tres
 operaciones principales:
@@ -53,6 +65,15 @@ operaciones principales:
 
 Adicionalmente:
   GET  /info         → documentación de las transformaciones disponibles
+
+--- Resiliencia ante RabbitMQ caído ---
+
+Si RabbitMQ no está disponible al iniciar, la API arranca igual con
+app.state.rabbit = None. En ese caso:
+  - GET /lote/{id} y GET /info funcionan normalmente
+  - POST /lote retorna HTTP 503 (servicio no disponible)
+
+Esto evita que la API se caiga completamente por un componente externo caído.
 
 --- Cómo recibe el batch ---
 
@@ -76,21 +97,22 @@ Ejemplo del JSON de instrucciones:
 
 --- Qué hace la API al recibir el batch ---
 
-1. Valida que cada imagen tenga su JSON correspondiente.
-2. Abre cada imagen con PIL para leer su formato real (JPEG/PNG/TIFF) y
+1. Verifica que RabbitMQ esté disponible (503 si no).
+2. Valida que cada imagen tenga su JSON correspondiente.
+3. Abre cada imagen con PIL para leer su formato real (JPEG/PNG/TIFF) y
    resolución (ej. "1920x1080"). Rechaza formatos no permitidos.
-3. Valida los parámetros de cada transformación (tipos, rangos, enums).
-4. Genera un UUID para el lote (id_lote) y uno para cada imagen (id_imagen).
-5. Guarda los archivos físicos en: api/storage/input/{id_lote}/
-6. Inserta los registros en SQLite: lote_procesamiento, imagen,
+4. Valida los parámetros de cada transformación (tipos, rangos, enums).
+5. Genera un UUID para el lote (id_lote) y uno para cada imagen (id_imagen).
+6. Guarda los archivos físicos en: api/storage/input/{id_lote}/
+7. Inserta los registros en PostgreSQL: lote_procesamiento, imagen,
    imagen_transformacion.
-7. Programa una tarea en background (BackgroundTask de Starlette) por cada
+8. Programa una tarea en background (BackgroundTask de Starlette) por cada
    imagen para publicarla en RabbitMQ.
-8. Retorna inmediatamente HTTP 200 con el id_lote, SIN esperar el
+9. Retorna inmediatamente HTTP 200 con el id_lote, SIN esperar el
    procesamiento.
 
-Los pasos 1–6 son síncronos (se completan antes de responder).
-El paso 7 es asíncrono: la publicación en RabbitMQ ocurre DESPUÉS de que
+Los pasos 1–7 son síncronos (se completan antes de responder).
+El paso 8 es asíncrono: la publicación en RabbitMQ ocurre DESPUÉS de que
 la respuesta HTTP ya fue enviada al cliente.
 
 --- Por qué es async la publicación ---
@@ -103,20 +125,47 @@ cierra el canal — todo sin bloquear el event loop ni crear threads. Esto
 permite publicar 50 o 100 mensajes en rápida sucesión sin saturar el servidor.
 
 --------------------------------------------------------------------------------
-3. COMPONENTE: BASE DE DATOS (SQLite)
+3. COMPONENTE: BASE DE DATOS (PostgreSQL)
 --------------------------------------------------------------------------------
 
-Tecnología:  SQLite (archivo database.db en la raíz del proyecto)
-Protocolo:   Acceso directo por archivo (no hay servidor de BD)
-Accedida por: API y Workers de forma independiente
+Tecnología:  PostgreSQL (servidor independiente, acceso por red)
+Puerto:      5432
+Protocolo:   SQL sobre TCP (psycopg2 como driver Python)
+Accedida por: API y Workers de forma independiente via red
 
-SQLite es una base de datos embebida — no corre como proceso separado. Tanto
-la API como los workers abren conexiones directas al archivo database.db.
-Esto funciona porque SQLite maneja el locking a nivel de archivo, y los
-patrones de acceso del sistema (la API escribe al inicio, los workers leen
-y actualizan durante el procesamiento) raramente generan contención.
+PostgreSQL corre como un proceso servidor separado — en deploy, en su propia
+VM. Tanto la API como los workers se conectan a él por red usando la variable
+de entorno DATABASE_URL. Esto resuelve el cuello de botella de SQLite (que
+serializaba escrituras concurrentes) al soportar múltiples escritores reales.
 
---- Modelo de datos relevante ---
+--- Cómo se conecta cada componente ---
+
+  API (persistence_service.py):
+    Usa get_cursor() — context manager que abre una conexión, entrega un
+    RealDictCursor (filas accesibles como diccionarios), hace commit al salir
+    o rollback si hay excepción, y cierra la conexión. Una conexión por
+    operación lógica.
+
+  Worker (worker.py):
+    Usa get_connection() — abre una conexión psycopg2 sin gestión automática.
+    Cada hilo del pool abre su propia conexión al inicio de _procesar_tarea
+    y la cierra en el bloque finally. Si ocurre un error, hace rollback
+    explícito antes de intentar actualizar estados a "error".
+
+--- Diferencias clave respecto a SQLite ---
+
+  SQLite          →  PostgreSQL
+  ?               →  %s  (placeholders)
+  AUTOINCREMENT   →  SERIAL
+  DATETIME        →  TIMESTAMP
+  INSERT OR IGNORE→  INSERT ... ON CONFLICT DO NOTHING
+  cursor.lastrowid→  RETURNING id_campo + fetchone()["id_campo"]
+  executescript() →  ejecutar cada sentencia por separado
+  PRAGMA WAL      →  no necesario (PostgreSQL maneja concurrencia nativamente)
+  row[0]          →  row["nombre_columna"] con RealDictCursor
+  COUNT(*)[0]     →  fetchone()["count"] con RealDictCursor
+
+--- Modelo de datos ---
 
 lote_procesamiento    → un registro por batch enviado
 imagen                → un registro por imagen, con formato y resolución real
@@ -124,7 +173,7 @@ imagen_transformacion → las transformaciones de cada imagen, en orden
 tarea_procesamiento   → creada por el worker cuando empieza a procesar
 resultado_procesamiento → creada por el worker al terminar (éxito o error)
 log_procesamiento     → trazabilidad detallada de cada paso
-nodo_worker           → registro de cada instancia de worker activa
+nodo_worker           → registro de cada instancia de worker (id = hostname-uuid6)
 transformacion        → catálogo de los 11 tipos disponibles (seed fijo)
 estado_lote/tarea/resultado/nodo → catálogos de estados (FKs normalizadas)
 
@@ -161,7 +210,7 @@ sobreviven un reinicio de RabbitMQ (se persisten en disco).
 
 2. RabbitMQ guarda el mensaje en la cola "cola_imagenes".
 
-3. Un worker libre recibe el mensaje.
+3. Un worker libre recibe el mensaje (hasta N_WORKERS simultáneos por proceso).
 
 4a. Si el worker procesa correctamente → envía ACK (acknowledgment).
     RabbitMQ elimina el mensaje de la cola.
@@ -171,19 +220,15 @@ sobreviven un reinicio de RabbitMQ (se persisten en disco).
 
 --- Balanceo automático entre workers ---
 
-Cada worker se conecta a RabbitMQ con prefetch_count=1. Esto significa que
-RabbitMQ solo le entrega UN mensaje a la vez a cada worker, y no le envía
-el siguiente hasta que el worker haga ACK del anterior. Con varios workers
-conectados, RabbitMQ distribuye los mensajes automáticamente al worker que
-esté libre — sin ningún código de coordinación adicional.
+Cada worker se conecta a RabbitMQ con prefetch_count=N_WORKERS. Esto
+significa que RabbitMQ le entrega hasta N mensajes a la vez a cada worker
+(uno por hilo del pool). Con varios procesos worker conectados, RabbitMQ
+distribuye los mensajes proporcionalmente a la capacidad de cada nodo.
 
-Ejemplo con 3 workers y 9 imágenes:
-  - Worker A recibe imagen 1, Worker B recibe imagen 2, Worker C imagen 3
-  - Si Worker B termina primero, recibe imagen 4
-  - Si Worker A tarda más, Worker B y C siguen procesando imágenes 4, 5, 6...
-  - Worker A recibe imagen 7 cuando termina imagen 1
-
-El sistema se balancea solo según la capacidad real de cada nodo.
+Ejemplo con 2 nodos (N_WORKERS=4 cada uno) y 20 imágenes:
+  - Nodo A recibe imágenes 1–4, Nodo B recibe imágenes 5–8 (8 en paralelo)
+  - Cuando un hilo de cualquier nodo termina, RabbitMQ le envía la siguiente
+  - El sistema se balancea solo según la capacidad real de cada nodo
 
 --- Por qué RabbitMQ y no una llamada directa ---
 
@@ -197,47 +242,66 @@ Esto permite agregar o quitar workers en caliente sin tocar la API.
 5. COMPONENTE: WORKER (Procesamiento de imágenes)
 --------------------------------------------------------------------------------
 
-Tecnología:  Python + pika (AMQP bloqueante) + Pillow (procesamiento de imagen)
+Tecnología:  Python + pika (AMQP bloqueante) + Pillow + ThreadPoolExecutor
 Protocolo de entrada:  AMQP (consume de RabbitMQ)
-Protocolo de salida:   SQL (escribe en SQLite) + archivos en disco
+Protocolo de salida:   SQL sobre red (PostgreSQL) + archivos en disco
 
-Cada worker es un proceso Python independiente. Se puede lanzar N instancias
-en la misma máquina o en máquinas distintas — siempre que todas puedan
-acceder a RabbitMQ, a SQLite y al directorio de storage.
+Cada worker es un proceso Python independiente con un pool interno de N hilos.
+Se puede lanzar una instancia por VM — el paralelismo real se logra a través
+de los hilos del pool (N_WORKERS), no lanzando múltiples procesos.
 
 --- Modelo de ejecución del worker ---
 
-El worker usa pika.BlockingConnection con channel.start_consuming(). Esto
-significa que el proceso queda bloqueado en un loop infinito esperando
-mensajes. Cuando llega uno, se ejecuta el callback on_message en el mismo
-hilo. El worker NO usa threads ni async — es un proceso secuencial de un solo
-hilo. Procesa una imagen completamente antes de recibir la siguiente
-(garantizado por prefetch_count=1).
+El hilo principal de pika corre channel.start_consuming() en un loop
+bloqueante. Cuando llega un mensaje, el callback on_message se ejecuta en
+ese hilo principal — pero su único trabajo es hacer executor.submit() y
+retornar inmediatamente. El procesamiento real ocurre en _procesar_tarea,
+que corre en uno de los N hilos del ThreadPoolExecutor.
+
+  Hilo principal (pika):
+    → recibe mensaje
+    → executor.submit(_procesar_tarea, ch, method, body)
+    → retorna (listo para recibir el siguiente mensaje)
+
+  Hilo del pool (_procesar_tarea):
+    → abre su propia conexión PostgreSQL
+    → procesa la imagen completa
+    → al terminar: connection.add_callback_threadsafe(lambda: ch.basic_ack(...))
+    → cierra la conexión PostgreSQL
+
+pika NO es thread-safe. Por eso el ACK/NACK no se puede llamar directamente
+desde un hilo del pool — debe programarse en el hilo principal de pika via
+add_callback_threadsafe. De lo mismo, psycopg2 no es thread-safe si múltiples
+hilos comparten una conexión, por eso cada hilo abre la suya propia.
 
 --- Qué hace el worker al recibir un mensaje ---
 
 1. Deserializa el JSON del mensaje (id_imagen, ruta, id_lote).
-2. Actualiza el estado de la imagen a "procesando" en SQLite.
-3. Crea un registro en tarea_procesamiento (queda trackeado con su id_nodo).
-4. Lee de SQLite las transformaciones de esa imagen, ordenadas por
+2. Abre conexión PostgreSQL propia (hilo del pool).
+3. Actualiza el estado de la imagen a "procesando".
+4. Crea un registro en tarea_procesamiento (queda trackeado con su id_nodo).
+5. Lee de PostgreSQL las transformaciones de esa imagen, ordenadas por
    orden_aplicacion.
-5. Registra en log_procesamiento el evento "procesando" con la descripción
+6. Registra en log_procesamiento el evento "procesando" con la descripción
    de los pasos: "resize(800x600) → blur(r=1.5) → watermark('Demo', bottom-right)"
-6. Abre la imagen con Pillow y aplica cada transformación en orden.
-7. Guarda la imagen resultante en storage/output/{id_lote}/
+7. Abre la imagen con Pillow y aplica cada transformación en orden.
+8. Guarda la imagen resultante en storage/output/{id_lote}/
    (la extensión del archivo depende de si hay una transformación "convert").
-8. Actualiza imagen y tarea_procesamiento a estado "completado".
-9. Inserta resultado_procesamiento con la ruta del archivo de salida.
-10. Registra en log_procesamiento el evento "completado".
-11. Comprueba si todas las imágenes del lote están completadas. Si es así,
+9. Actualiza imagen y tarea_procesamiento a estado "completado".
+10. Inserta resultado_procesamiento con la ruta del archivo de salida.
+11. Registra en log_procesamiento el evento "completado".
+12. Comprueba si todas las imágenes del lote están completadas. Si es así,
     actualiza lote_procesamiento a "completado" y borra el directorio
     storage/input/{id_lote}/ (limpieza automática).
-12. Envía ACK a RabbitMQ.
+    El UPDATE usa WHERE id_estado_lote != completado para que solo el primer
+    hilo que llegue lo marque — los demás ven rowcount=0 y no limpian.
+13. Envía ACK a RabbitMQ (via add_callback_threadsafe).
 
-Si ocurre cualquier error en pasos 2–11:
+Si ocurre cualquier error en pasos 3–12:
+- Hace rollback de la transacción en curso.
 - Actualiza imagen y tarea a estado "error".
 - Registra en log_procesamiento el evento "error" con el mensaje de la excepción.
-- Envía NACK a RabbitMQ (sin reencolar).
+- Envía NACK a RabbitMQ via add_callback_threadsafe (sin reencolar).
 
 --- Las 11 transformaciones ---
 
@@ -264,10 +328,11 @@ FASE 1 — INGESTA (API, síncrona, ~100ms)
 
   Cliente → POST /lote (multipart/form-data con imágenes + JSONs)
       │
+      ├─ Verificación de RabbitMQ disponible (503 si no)
       ├─ Validación de formato PIL (JPEG/PNG/TIFF)
       ├─ Validación de parámetros de transformaciones
       ├─ Escritura en storage/input/{id_lote}/
-      ├─ INSERT en SQLite: lote, imágenes, transformaciones
+      ├─ INSERT en PostgreSQL: lote, imágenes, transformaciones
       └─ Respuesta HTTP 200: { "id_lote": "...", "estado": "procesando" }
 
 FASE 2 — ENCOLADO (API → RabbitMQ, async post-respuesta)
@@ -280,16 +345,18 @@ FASE 2 — ENCOLADO (API → RabbitMQ, async post-respuesta)
 
 FASE 3 — PROCESAMIENTO (RabbitMQ → Worker, paralelo)
 
-  Worker libre recibe mensaje de RabbitMQ:
+  Hilo del pool recibe tarea de pika:
       │
-      ├─ Lee transformaciones de SQLite (ORDER BY orden_aplicacion)
+      ├─ Abre conexión PostgreSQL propia
+      ├─ Lee transformaciones de PostgreSQL (ORDER BY orden_aplicacion)
       ├─ Aplica pipeline Pillow (11 transformaciones posibles)
       ├─ Guarda resultado en storage/output/{id_lote}/
-      ├─ Actualiza SQLite: imagen, tarea, resultado, logs
+      ├─ Actualiza PostgreSQL: imagen, tarea, resultado, logs
       ├─ Si último del lote: actualiza lote a "completado", limpia input/
-      └─ ACK → RabbitMQ elimina el mensaje
+      ├─ Cierra conexión PostgreSQL
+      └─ ACK via add_callback_threadsafe → RabbitMQ elimina el mensaje
 
-FASE 4 — CONSULTA DE ESTADO (cliente → API → SQLite)
+FASE 4 — CONSULTA DE ESTADO (cliente → API → PostgreSQL)
 
   Cliente → GET /lote/{id_lote}
       │
@@ -324,21 +391,18 @@ FASE 5 — DESCARGA (cliente → API → disco)
 --- Contrato RabbitMQ → Worker (mismo mensaje) ---
 
   El worker espera exactamente los tres campos anteriores.
-  Si falta alguno o el JSON es inválido → KeyError → NACK.
+  Si falta alguno o el JSON es inválido → KeyError → rollback → NACK.
 
---- Contrato API → SQLite (datos que el worker necesita leer) ---
+--- Contrato API → PostgreSQL (datos que el worker necesita leer) ---
 
-  Antes de publicar el mensaje en RabbitMQ, la API garantiza que en SQLite
-  ya existen:
+  Antes de publicar el mensaje en RabbitMQ, la API garantiza que en
+  PostgreSQL ya existen:
   - El registro imagen con id_imagen
   - Los registros imagen_transformacion con sus parametros_json y orden_aplicacion
 
   El worker asume que esta data está disponible cuando recibe el mensaje.
-  Si no estuviera (race condition teórico con lotes enormes), el worker
-  obtendría una lista vacía de transformaciones y procesaría la imagen sin
-  cambios.
 
---- Contrato Worker → SQLite (estados que la API lee) ---
+--- Contrato Worker → PostgreSQL (estados que la API lee) ---
 
   El worker escribe los estados usando los mismos IDs de catálogo que la API:
     pendiente=1, procesando=2, completado=3, error=4
@@ -350,56 +414,70 @@ FASE 5 — DESCARGA (cliente → API → disco)
 8. ESCALABILIDAD Y DISTRIBUCIÓN
 --------------------------------------------------------------------------------
 
---- Escalar workers ---
+--- Paralelismo dentro de un nodo (ThreadPoolExecutor) ---
 
-Para procesar más imágenes en paralelo, se lanzan más instancias de worker.py.
-Cada una se identifica con un ID único (hostname-uuid6) y se registra en
-nodo_worker. RabbitMQ distribuye automáticamente los mensajes entre todas las
-instancias activas gracias a prefetch_count=1.
+Cada proceso worker tiene un pool de N hilos (N_WORKERS, configurable via
+variable de entorno, default: os.cpu_count()). Todos los hilos comparten
+el mismo proceso pika pero cada uno tiene su propia conexión PostgreSQL.
 
-Workers en la misma máquina: comparten CPU, RAM y disco. El paralelismo es
-real si hay múltiples cores (cada worker es un proceso separado, no un thread,
-por lo que no hay GIL de Python).
+Con N_WORKERS=4 en un nodo, ese nodo puede procesar 4 imágenes a la vez.
+RabbitMQ le entrega hasta 4 mensajes simultáneos (prefetch_count=N_WORKERS).
 
-Workers en máquinas distintas: cada máquina aporta sus propios recursos.
-Los requisitos son: acceso a RabbitMQ (localhost:5672 o IP remota), acceso
-al mismo storage compartido (NFS, volumen compartido, o similar), y acceso
-al mismo database.db. En una arquitectura real esto requeriría storage y BD
-en red, pero para el entorno actual (una sola máquina) no aplica.
+--- Paralelismo entre nodos (múltiples VMs) ---
 
---- Cuello de botella actual ---
+Cada VM corre un proceso worker independiente. Con 2 VMs de N_WORKERS=4:
+el sistema tiene 8 hilos de procesamiento en total, distribuidos entre
+2 máquinas físicas distintas. RabbitMQ balancea automáticamente.
 
-Con la arquitectura presente (una máquina), el cuello de botella es el disco:
-todos los workers leen de storage/input y escriben en storage/output sobre
-el mismo disco físico. Con lotes grandes (50+ imágenes), múltiples workers
-compiten por I/O de disco simultáneamente. Aumentar workers más allá del
-número de cores no mejora el throughput si el disco está saturado.
+La capacidad real del nodo queda registrada en nodo_worker.capacidad = N_WORKERS
+para trazabilidad.
 
---- Por qué SQLite y no PostgreSQL ---
+--- Elección del número de hilos ---
 
-SQLite es suficiente para el volumen actual y evita la complejidad de un
-servidor de BD adicional. La limitación es que SQLite tiene locking a nivel
-de archivo: múltiples writers concurrentes se serializan. Con muchos workers
-actualizando estados simultáneamente podría convertirse en un cuello de botella,
-pero para el alcance del proyecto es completamente adecuado.
+Para trabajo CPU-bound con Pillow (que libera el GIL en operaciones C):
+  - Mínimo útil:          2
+  - Punto de partida:     os.cpu_count()
+  - Óptimo empírico:      cpu_count * 1.5 (por tiempos de I/O entre operaciones)
+  - Máximo recomendado:   cpu_count * 2
+  - Techo real:           limitado por RAM (cada hilo carga una imagen completa)
+
+--- Por qué PostgreSQL en lugar de SQLite ---
+
+SQLite serializa todas las escrituras (locking a nivel de archivo). Con
+N hilos escribiendo estados simultáneamente, esto se vuelve cuello de botella.
+PostgreSQL soporta escrituras concurrentes reales y corre como servidor
+independiente — accesible desde múltiples VMs por red. Permite que la API
+y todos los workers accedan a la misma BD sin conflictos.
+
+--- Storage compartido ---
+
+En el deploy actual con VMs, el storage (storage/input y storage/output)
+vive en la VM de la API. Los workers acceden a él por red (NFS o compartido).
+Esto es un punto de mejora futuro: idealmente el storage estaría en un
+servidor dedicado o en un bucket de objetos.
 
 --------------------------------------------------------------------------------
 9. HERRAMIENTAS DE PRUEBA
 --------------------------------------------------------------------------------
 
-generarbatch.py (raíz) y scripts/generarbatch.py:
+scripts/generarbatch.py:
   - Genera N imágenes descargadas de picsum.photos
   - Asigna entre 1 y 5 transformaciones aleatorias por imagen
   - Respeta el orden lógico: crop → resize → flip/rotate → brightness/contrast
     → blur/sharpen → watermark → convert
   - Empaqueta todo en lote.zip listo para enviar a POST /lote
 
-Uso:
-  python generarbatch.py 10       → genera 10 imágenes en lote.zip
-  python scripts/generarbatch.py 10  → ídem (versión alternativa)
+scripts/stress_test.py:
+  - Prueba de carga concurrente (~2 minutos)
+  - Envía múltiples lotes en paralelo en distintos momentos
+  - Monitorea progreso en tiempo real
+  - Descarga y descarta resultados automáticamente
+  - Genera reporte timestamped con tiempos promedio
 
-Luego:
+Uso:
+  python scripts/generarbatch.py 10
   curl -X POST http://localhost:8000/lote -F "archivos=@lote.zip"
+  python scripts/stress_test.py --url http://localhost:8000
 
 ================================================================================
   FIN DEL DOCUMENTO

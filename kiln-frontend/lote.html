@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Kiln — Lote</title>
+  <link rel="icon" type="image/svg+xml" href="assets/logo.svg"/>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" href="css/styles.css"/>
+</head>
+<body>
+  <main class="container">
+    <div class="page-header">
+      <div>
+        <h1>Detalle del lote</h1>
+        <p>
+          Estado en tiempo real: Kiln polea <span class="mono">GET /lote/&lt;id&gt;</span>
+          cada 2s mientras esté en curso, y habilita la descarga cuando esté completo.
+        </p>
+      </div>
+      <div class="flex-gap">
+        <a class="btn" href="lotes.html">← Volver a mis lotes</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="flex-between" style="margin-bottom: 16px; gap: 12px; flex-wrap: wrap;">
+        <div>
+          <div class="text-xs text-muted">id_lote</div>
+          <div class="mono" id="lote-id" style="font-size: 14px; margin-top: 2px;">—</div>
+        </div>
+        <div id="lote-estado"><span class="badge">cargando…</span></div>
+      </div>
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-label">Total</div>
+          <div class="stat-value" id="stat-total">—</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Completadas</div>
+          <div class="stat-value" id="stat-done">—</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Progreso</div>
+          <div class="stat-value" id="stat-pct">—<span class="sub">%</span></div>
+        </div>
+      </div>
+
+      <div class="progress-bar" style="height: 8px;"><div class="progress-fill" id="progress-fill" style="width: 0%"></div></div>
+
+      <div class="flex-between mt-24" style="flex-wrap: wrap; gap: 12px;">
+        <div id="lote-last-update" class="text-xs text-muted">—</div>
+        <div class="flex-gap">
+          <button class="btn" id="btn-refresh">Refrescar ahora</button>
+          <button class="btn btn-primary" id="btn-download" disabled>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+            Descargar ZIP
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card mt-24" id="lote-nombres-card" style="display:none;">
+      <h3 class="card-title mt-0">Imágenes del lote (según este navegador)</h3>
+      <p class="card-subtitle mt-0" style="margin-bottom: 12px;">
+        Los nombres se guardan en localStorage al enviar el lote — no se consultan al servidor.
+      </p>
+      <div class="mono text-sm" id="lote-nombres"></div>
+    </div>
+  </main>
+
+  <script type="module" src="js/lote.js"></script>
+</body>
+</html>

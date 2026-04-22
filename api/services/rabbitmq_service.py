@@ -19,11 +19,14 @@ async def conectar() -> AbstractRobustConnection:
     return connection
 
 
-async def publicar_tarea(connection: AbstractRobustConnection, data: dict) -> None:
+async def publicar_tarea(connection: AbstractRobustConnection | None, data: dict) -> None:
     """
     Publica un mensaje en la cola. Abre un canal por publicación y lo cierra al terminar.
     Es seguro llamar concurrentemente desde múltiples coroutines.
     """
+    if connection is None:
+        print(f"[RabbitMQ] Conexion no disponible, tarea descartada: {data.get('id_imagen', '')[:8]}")
+        return
     async with connection.channel() as channel:
         await channel.default_exchange.publish(
             aio_pika.Message(

@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Kiln — Mis lotes</title>
+  <link rel="icon" type="image/svg+xml" href="assets/logo.svg"/>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" href="css/styles.css"/>
+</head>
+<body>
+  <main class="container">
+    <div class="page-header">
+      <div>
+        <h1>Mis lotes</h1>
+        <p>
+          Historial de los lotes enviados desde este navegador. Kiln consulta el estado
+          real a <span class="mono">GET /lote/&lt;id&gt;</span> cada vez que se refresca.
+        </p>
+      </div>
+      <div class="flex-gap">
+        <input class="input" id="id-input" placeholder="Pegar id_lote para abrir…" style="width: 320px;" />
+        <button class="btn" id="btn-open">Abrir</button>
+        <a class="btn btn-primary" href="forge.html">+ Nuevo lote</a>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">
+        <div>
+          <h3 class="card-title">Historial local</h3>
+          <p class="card-subtitle">Últimos 100 lotes creados desde este dispositivo.</p>
+        </div>
+        <button class="btn btn-sm" id="btn-refresh">Refrescar</button>
+      </div>
+      <div id="lotes-table-wrap">
+        <div class="empty-state" style="margin: 24px;">
+          Cargando…
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script type="module" src="js/lotes.js"></script>
+</body>
+</html>

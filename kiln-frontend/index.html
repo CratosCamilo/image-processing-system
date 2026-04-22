@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Kiln — Iniciar sesión</title>
+  <meta name="description" content="Kiln — forge your images in parallel"/>
+  <link rel="icon" type="image/svg+xml" href="assets/logo.svg"/>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" href="css/styles.css"/>
+</head>
+<body>
+  <div class="login-wrap">
+    <div class="login-card">
+      <div class="login-logo">
+        <img src="assets/logo.svg" alt="Kiln logo"/>
+        <span class="login-logo-text">Kiln</span>
+      </div>
+      <h1 class="login-title">Forge your images<br/>in parallel</h1>
+      <p class="login-sub">
+        Inicia sesión para enviar lotes al sistema distribuido de procesamiento
+        de imágenes.
+      </p>
+
+      <form id="login-form" class="field-group" autocomplete="on">
+        <div>
+          <label class="label" for="correo">Correo</label>
+          <input class="input" id="correo" type="email" name="correo" autocomplete="username" placeholder="admin@test.com" required/>
+        </div>
+        <div>
+          <label class="label" for="password">Contraseña</label>
+          <input class="input" id="password" type="password" name="password" autocomplete="current-password" placeholder="••••••••" required/>
+        </div>
+        <button class="btn btn-primary btn-block" id="submit-btn" type="submit">
+          <span id="submit-label">Entrar al horno</span>
+        </button>
+      </form>
+
+      <div class="login-hint">
+        <b>Credenciales de prueba (seed del backend):</b><br/>
+        <kbd>admin@test.com</kbd> · <kbd>1234</kbd>
+      </div>
+
+      <div class="mt-16 text-xs text-dim" style="display:flex;justify-content:space-between;align-items:center;">
+        <span id="api-hint"></span>
+        <button class="btn btn-ghost btn-sm" id="btn-settings-login">Configurar API</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="js/auth.js"></script>
+</body>
+</html>

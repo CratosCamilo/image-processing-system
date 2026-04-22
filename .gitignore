@@ -57,3 +57,4 @@ docker-data/
 *.temp
 CLAUDE.md
 PROGRESS.md
+HILOS_WORKER.txt

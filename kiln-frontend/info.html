@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Kiln — Docs</title>
+  <link rel="icon" type="image/svg+xml" href="assets/logo.svg"/>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" href="css/styles.css"/>
+</head>
+<body>
+  <main class="container">
+    <div class="page-header">
+      <div>
+        <h1>Transformaciones disponibles</h1>
+        <p>
+          Información consumida en vivo desde <span class="mono">GET /info</span> —
+          incluye parámetros, ejemplos y el flujo completo del sistema.
+        </p>
+      </div>
+      <div class="flex-gap">
+        <a class="btn btn-primary" href="forge.html">Ir a forjar un lote →</a>
+      </div>
+    </div>
+
+    <div id="info-content">
+      <div class="card"><div class="text-muted">Cargando información del sistema…</div></div>
+    </div>
+  </main>
+
+  <script type="module" src="js/info.js"></script>
+</body>
+</html>

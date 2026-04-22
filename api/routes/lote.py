@@ -5,12 +5,13 @@ import zipfile
 from io import BytesIO
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse
 from PIL import Image
 from typing import List
 
 from schemas.lote_schema import LoteEstadoResponse, LoteResponse
+from services.auth_service import get_current_user
 from services.persistence_service import PersistenceService
 from services.rabbitmq_service import publicar_tarea
 from services.storage_service import StorageService
@@ -184,7 +185,18 @@ Si se incluye `convert`, debe ir al **final** de la lista.
     summary="Crear lote de procesamiento",
     description=_DESCRIPCION_POST_LOTE,
 )
-async def crear_lote(request: Request, background_tasks: BackgroundTasks, archivos: List[UploadFile] = File(...)):
+async def crear_lote(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    archivos: List[UploadFile] = File(...),
+    current_user: dict = Depends(get_current_user),
+):
+    if request.app.state.rabbit is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Servicio de cola no disponible — RabbitMQ no esta conectado",
+        )
+
     for f in archivos:
         if not f.filename:
             raise HTTPException(status_code=400, detail="Archivo sin nombre detectado")
@@ -234,7 +246,7 @@ async def crear_lote(request: Request, background_tasks: BackgroundTasks, archiv
         )
 
     id_lote = str(uuid.uuid4())
-    persistence.crear_lote(id_lote)
+    persistence.crear_lote(id_lote, current_user["id_usuario"])
 
     for nombre_base, archivo_img in imagenes.items():
         archivo_json = jsons[nombre_base]
@@ -278,10 +290,15 @@ async def crear_lote(request: Request, background_tasks: BackgroundTasks, archiv
     summary="Estado del lote",
     description="Retorna el estado actual del lote y el progreso de procesamiento.",
 )
-async def estado_lote(id_lote: str):
+async def estado_lote(id_lote: str, current_user: dict = Depends(get_current_user)):
     lote = persistence.obtener_lote(id_lote)
     if not lote:
         raise HTTPException(status_code=404, detail="Lote no encontrado")
+    if not persistence.verificar_propietario_lote(id_lote, current_user["id_usuario"]):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tiene acceso a este lote",
+        )
 
     stats = persistence.obtener_estadisticas_lote(id_lote)
     total = stats["total"]
@@ -302,10 +319,19 @@ async def estado_lote(id_lote: str):
     summary="Descargar resultados",
     description="Descarga un ZIP con todas las imágenes procesadas del lote. Limpia el directorio de salida tras la descarga.",
 )
-async def descargar_resultado(id_lote: str, background_tasks: BackgroundTasks):
+async def descargar_resultado(
+    id_lote: str,
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(get_current_user),
+):
     lote = persistence.obtener_lote(id_lote)
     if not lote:
         raise HTTPException(status_code=404, detail="Lote no encontrado")
+    if not persistence.verificar_propietario_lote(id_lote, current_user["id_usuario"]):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tiene acceso a este lote",
+        )
     if lote["estado"] != "completado":
         raise HTTPException(status_code=400, detail="El lote aún no está completado")
 

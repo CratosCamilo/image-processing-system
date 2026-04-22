@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Kiln — Forge batch</title>
+  <link rel="icon" type="image/svg+xml" href="assets/logo.svg"/>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" href="css/styles.css"/>
+</head>
+<body>
+  <main class="container">
+    <div class="page-header">
+      <div>
+        <h1>Forge un lote nuevo</h1>
+        <p>
+          Sube tus imágenes, define transformaciones globales que aplican a todas y,
+          si quieres, añade pasos específicos por imagen. Al enviar, Kiln empaqueta
+          cada imagen con su JSON y lo publica al sistema distribuido.
+        </p>
+      </div>
+      <div class="flex-gap">
+        <button class="btn" id="btn-reset" title="Vaciar la canvas actual">Limpiar</button>
+        <button class="btn btn-primary" id="btn-forge">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M5 3v4m-2-2h4M19 17v4m-2-2h4M14 3l1.5 3.5L19 8l-3.5 1.5L14 13l-1.5-3.5L9 8l3.5-1.5Z"/>
+          </svg>
+          Forjar lote
+        </button>
+      </div>
+    </div>
+
+    <div class="forge-grid">
+      <!-- LEFT: Images panel -->
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <h3 class="card-title">Imágenes del lote</h3>
+            <p class="card-subtitle">JPEG, PNG o TIFF · clic para editar transformaciones por imagen</p>
+          </div>
+          <span class="badge" id="img-counter">0</span>
+        </div>
+        <div class="panel-body">
+          <label class="dropzone" id="dropzone">
+            <input type="file" id="file-input" accept=".jpg,.jpeg,.png,.tif,.tiff,image/jpeg,image/png,image/tiff" multiple/>
+            <svg class="dropzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="17 8 12 3 7 8"/>
+              <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+            <div class="dropzone-title">Arrastra imágenes aquí o haz clic para seleccionar</div>
+            <div class="dropzone-sub">Formatos permitidos: JPEG, PNG, TIFF</div>
+          </label>
+          <div class="img-grid" id="img-grid"></div>
+        </div>
+      </section>
+
+      <!-- RIGHT: Transformations panel -->
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <h3 class="card-title">Transformaciones</h3>
+            <p class="card-subtitle">Las globales se aplican a TODAS · las individuales se suman después</p>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div class="scope-tabs" role="tablist">
+            <button class="scope-tab active" data-scope="global">
+              Globales <span class="count" id="count-global">0</span>
+            </button>
+            <button class="scope-tab" data-scope="individual" id="tab-individual" disabled>
+              Imagen activa <span class="count" id="count-individual">0</span>
+            </button>
+          </div>
+
+          <p class="scope-subtitle" id="scope-help">
+            Estas transformaciones se aplican a todas las imágenes del lote.
+          </p>
+
+          <div class="field-group mt-16">
+            <label class="label">Añadir transformación</label>
+            <div class="input-row">
+              <select class="select" id="transform-select"></select>
+              <button class="btn btn-primary" id="btn-add-transform" style="flex: 0 0 auto;">
+                +
+              </button>
+            </div>
+          </div>
+
+          <div id="transform-list-wrap" class="mt-16">
+            <div class="transform-list" id="transform-list"></div>
+          </div>
+
+          <hr/>
+
+          <div class="flex-between" style="margin-bottom: 8px;">
+            <span class="label mt-0">Preview del JSON de la imagen activa</span>
+            <span class="text-xs text-dim mono" id="active-img-name">—</span>
+          </div>
+          <div class="json-preview mono" id="json-preview">// Sube al menos una imagen y añade transformaciones</div>
+        </div>
+      </section>
+    </div>
+
+    <!-- Forging status modal -->
+    <div class="modal-overlay" id="forge-modal">
+      <div class="modal">
+        <h3 class="modal-title" id="forge-modal-title">Forjando lote…</h3>
+        <p class="modal-body" id="forge-modal-body">
+          Enviando <span class="mono" id="forge-count">0</span> imágenes al sistema distribuido.
+          Kiln publicará un mensaje por imagen en RabbitMQ y los workers procesarán en paralelo.
+        </p>
+        <div class="progress-bar">
+          <div class="progress-fill indeterminate" id="forge-progress"></div>
+        </div>
+        <div class="mt-16 text-xs text-muted" id="forge-modal-status">
+          Contactando el backend…
+        </div>
+        <div class="modal-actions mt-16 hidden" id="forge-modal-actions">
+          <a class="btn" id="forge-goto-lotes" href="lotes.html">Ver mis lotes</a>
+          <a class="btn btn-primary" id="forge-goto-detail" href="#">Abrir lote</a>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script type="module" src="js/forge.js"></script>
+</body>
+</html>
