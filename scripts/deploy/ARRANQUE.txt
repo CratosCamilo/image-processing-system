@@ -1,0 +1,315 @@
+================================================================================
+  GUÍA DE ARRANQUE — SISTEMA DISTRIBUIDO DE PROCESAMIENTO DE IMÁGENES
+================================================================================
+
+ANOTA LAS IPs CADA VEZ QUE ARRANQUES (cambian con DHCP):
+
+  IP-VM-DB       = _______________   (ejemplo casa: 192.168.40.12)
+  IP-VM-API      = _______________   (ejemplo casa: 192.168.40.15)
+  IP-VM-WORKER-1 = _______________   (ejemplo casa: 192.168.40.18)
+  IP-VM-WORKER-2 = _______________   (ejemplo casa: 192.168.40.20)
+
+
+================================================================================
+  PARTE 0 — SOLO SI ESTÁS EN OTRA RED/PC Y NECESITAS RECREAR LAS VMs
+  (Si las VMs ya existen en VirtualBox, salta a la PARTE 1)
+================================================================================
+
+Tienes los discos .vdi pero VirtualBox no los conoce todavía:
+
+1. Abre VirtualBox
+2. File → Tools → Virtual Media Manager → pestaña Hard Disks → Add
+   → selecciona cada .vdi (vhd-api.vdi, vhd-db.vdi, vhd-worker.vdi y el clon de worker-2)
+
+3. Crea una VM para cada disco:
+   New → Nombre (vm-api / vm-db / vm-worker-1 / vm-worker-2)
+   Type: Linux / Version: Ubuntu (64-bit)
+   RAM: 2048 MB / CPU: 2
+   → "Use an existing virtual hard disk file" → selecciona el .vdi correspondiente
+
+4. Para CADA VM antes de arrancar:
+   Settings → Network → Adapter 1 → Bridged Adapter → tu tarjeta de red
+
+5. NO instales Ubuntu — el SO ya está dentro del .vdi. Simplemente arranca la VM.
+
+NOTA: vm-worker-2 no tiene su propio .vdi en discos-virtuales/ — VirtualBox
+lo guardó en vms_settings/vm-worker-2/. Lleva esa carpeta también.
+
+
+================================================================================
+  PARTE 1 — ARRANQUE ORDENADO (HACER CADA VEZ QUE USES EL SISTEMA)
+================================================================================
+
+IMPORTANTE: siempre en este orden. Si arrancas los workers antes que la API,
+se desconectarán de RabbitMQ y habrá que reiniciarlos.
+
+----------------------------------------------------------------------
+PASO 1 — Encender VM-DB
+----------------------------------------------------------------------
+Arranca vm-db en VirtualBox. Espera 15 segundos.
+
+Desde PowerShell en tu PC:
+  ssh ubuntu@<IP-VM-DB>
+  (contraseña: ubuntu123)
+
+Dentro de la VM, anota la IP:
+  hostname -I
+
+Si la IP cambió respecto a la última vez → ver PARTE 2 antes de continuar.
+
+Verifica que PostgreSQL está corriendo:
+  systemctl status postgresql
+
+Debe decir: active (running)
+
+----------------------------------------------------------------------
+PASO 2 — Encender VM-API
+----------------------------------------------------------------------
+Arranca vm-api en VirtualBox. Espera 30 segundos.
+
+Desde PowerShell:
+  ssh ubuntu@<IP-VM-API>
+  hostname -I
+
+Si la IP cambió → ver PARTE 2.
+
+Verifica que RabbitMQ y la API están corriendo:
+  systemctl status rabbitmq-server
+  systemctl status api
+
+Ambos deben decir: active (running)
+
+Prueba rápida (desde cualquier terminal):
+  curl http://<IP-VM-API>:8000/info
+
+Si responde con JSON de transformaciones → API OK.
+
+----------------------------------------------------------------------
+PASO 3 — Encender VM-Worker-1 y VM-Worker-2
+----------------------------------------------------------------------
+Arranca ambas VMs en VirtualBox.
+
+Desde PowerShell (en terminales separadas):
+  ssh ubuntu@<IP-VM-WORKER-1>
+  ssh ubuntu@<IP-VM-WORKER-2>
+
+En cada una:
+  hostname -I
+  systemctl status worker
+
+Debe decir: active (running)
+
+Si la IP de VM-API cambió → ver PARTE 2 antes de arrancar los workers.
+
+
+================================================================================
+  PARTE 2 — SI UNA IP CAMBIÓ (actualizar configuración)
+================================================================================
+
+----------------------------------------------------------------------
+Si cambió la IP de VM-DB:
+----------------------------------------------------------------------
+En VM-API:
+  nano ~/.env.api
+  → cambiar la IP en DATABASE_URL
+  Ctrl+O → Enter → Ctrl+X
+  sudo systemctl restart api
+
+En VM-Worker-1 y VM-Worker-2 (hacer en ambas):
+  nano ~/.env.worker
+  → cambiar la IP en DATABASE_URL
+  Ctrl+O → Enter → Ctrl+X
+  sudo systemctl restart worker
+
+----------------------------------------------------------------------
+Si cambió la IP de VM-API:
+----------------------------------------------------------------------
+En VM-Worker-1 y VM-Worker-2 (hacer en ambas):
+  # Actualizar RABBITMQ_HOST en el .env
+  nano ~/.env.worker
+  → cambiar RABBITMQ_HOST=<nueva IP de VM-API>
+  Ctrl+O → Enter → Ctrl+X
+
+  # Actualizar el mount NFS
+  sudo umount ~/image-processing-system/api/storage
+  sudo nano /etc/fstab
+  → cambiar la IP en la línea del NFS mount
+  Ctrl+O → Enter → Ctrl+X
+  sudo mount -a
+
+  # Reiniciar el worker
+  sudo systemctl restart worker
+
+  Verifica que el NFS está montado:
+  df -h | grep storage
+  (debe mostrar una línea con la IP de VM-API)
+
+
+================================================================================
+  PARTE 3 — VERIFICACIÓN RÁPIDA DEL SISTEMA
+================================================================================
+
+Ejecuta desde PowerShell en tu PC:
+
+  # 1. API responde
+  curl http://<IP-VM-API>:8000/info
+
+  # 2. Login (copia el access_token del resultado)
+  curl -X POST http://<IP-VM-API>:8000/auth/login `
+    -H "Content-Type: application/json" `
+    -Body '{"correo":"admin@test.com","password":"1234"}'
+
+  # 3. Ver nodos worker registrados en la BD
+  ssh ubuntu@<IP-VM-DB> "sudo -u postgres psql -d image_processing -c \"SELECT id_nodo, hostname, capacidad, id_estado_nodo FROM nodo_worker;\""
+
+  Debes ver 2 filas (vm-worker-1 y vm-worker-2) con id_estado_nodo=1 (activo)
+
+
+================================================================================
+  PARTE 4 — VER LOGS EN TIEMPO REAL
+================================================================================
+
+----------------------------------------------------------------------
+Logs de la API (VM-API):
+----------------------------------------------------------------------
+  ssh ubuntu@<IP-VM-API>
+  journalctl -u api -f
+
+Verás cada petición HTTP procesada. Ctrl+C para salir.
+
+----------------------------------------------------------------------
+Logs del Worker — modo servicio (VM-Worker-1 o 2):
+----------------------------------------------------------------------
+  ssh ubuntu@<IP-VM-WORKER-1>
+  journalctl -u worker -f
+
+NOTA: el output puede aparecer con retraso por buffering de Python.
+Si no ves nada, usa el modo manual (ver abajo).
+
+----------------------------------------------------------------------
+Logs del Worker — modo manual con output completo (RECOMENDADO PARA DEMO):
+----------------------------------------------------------------------
+En VM-Worker-1 o VM-Worker-2:
+  sudo systemctl stop worker
+  set -a; source ~/.env.worker; set +a
+  cd ~/image-processing-system/worker
+  source venv/bin/activate
+  python worker.py
+
+Verás en tiempo real qué imagen procesa cada hilo.
+Ctrl+C para detener. Luego para volver al modo servicio:
+  sudo systemctl start worker
+
+----------------------------------------------------------------------
+Ver estado de la base de datos (VM-DB):
+----------------------------------------------------------------------
+  ssh ubuntu@<IP-VM-DB>
+
+  # Nodos worker registrados
+  sudo -u postgres psql -d image_processing -c "SELECT id_nodo, hostname, capacidad, id_estado_nodo FROM nodo_worker;"
+
+  # Lotes procesados
+  sudo -u postgres psql -d image_processing -c "SELECT id_lote, fecha_creacion, id_estado_lote FROM lote_procesamiento ORDER BY fecha_creacion DESC LIMIT 5;"
+
+  # Imágenes de un lote
+  sudo -u postgres psql -d image_processing -c "SELECT id_imagen, nombre_archivo, id_estado_tarea FROM imagen WHERE id_lote='<ID-LOTE>';"
+
+----------------------------------------------------------------------
+Logs de un lote específico:
+----------------------------------------------------------------------
+  sudo -u postgres psql -d image_processing -c "SELECT tipo_evento, id_nodo, descripcion, fecha_evento FROM log_procesamiento WHERE id_lote='<ID-LOTE>' ORDER BY fecha_evento;"
+
+
+================================================================================
+  PARTE 5 — ENVIAR UN LOTE DE PRUEBA
+================================================================================
+
+Desde tu PC (con el proyecto clonado):
+
+  # Generar batch de N imágenes (ej: 5)
+  cd "C:\Users\USUARIO PC\Documents\Universidad\2026-1\Sistemas Distribuidos\image-processing-system"
+  python scripts/generarbatch.py 5
+
+  # En PowerShell: obtener token
+  $r = Invoke-RestMethod -Uri "http://<IP-VM-API>:8000/auth/login" `
+    -Method POST -ContentType "application/json" `
+    -Body '{"correo":"admin@test.com","password":"1234"}'
+  $TOKEN = $r.access_token
+
+  # Subir el lote
+  curl -X POST http://<IP-VM-API>:8000/lote `
+    -H "Authorization: Bearer $TOKEN" `
+    -F "archivos=@lote.zip"
+
+  # Consultar estado (reemplaza el id_lote)
+  curl http://<IP-VM-API>:8000/lote/<ID-LOTE> `
+    -H "Authorization: Bearer $TOKEN"
+
+  # Descargar resultado cuando esté completado
+  curl http://<IP-VM-API>:8000/lote/<ID-LOTE>/resultado `
+    -H "Authorization: Bearer $TOKEN" `
+    -o resultado.zip
+
+
+================================================================================
+  PARTE 6 — EXPONER LA API AL EXTERIOR (NGROK)
+================================================================================
+
+Para usar el frontend web (klin-frontend.vercel.app) o acceder desde otra red:
+
+Desde tu PC host (ngrok ya instalado):
+  ngrok http <IP-VM-API>:8000
+
+Copia la URL HTTPS que aparece, ejemplo:
+  https://a1b2c3d4.ngrok-free.app
+
+Esa URL la pones en el frontend → "Configurar API" → pegar la URL de ngrok.
+
+NOTA: la URL de ngrok cambia cada vez que lo reinicias (en el plan gratuito).
+Cada sesión nueva → nueva URL → actualizar en el frontend.
+
+
+================================================================================
+  PARTE 7 — APAGAR EL SISTEMA
+================================================================================
+
+Apaga en orden inverso (no es estrictamente necesario pero es más limpio):
+
+  # Workers primero
+  ssh ubuntu@<IP-VM-WORKER-1> "sudo shutdown -h now"
+  ssh ubuntu@<IP-VM-WORKER-2> "sudo shutdown -h now"
+
+  # Luego API
+  ssh ubuntu@<IP-VM-API> "sudo shutdown -h now"
+
+  # Luego BD
+  ssh ubuntu@<IP-VM-DB> "sudo shutdown -h now"
+
+O simplemente cierra las ventanas de VirtualBox con "ACPI Shutdown".
+
+
+================================================================================
+  CREDENCIALES Y DATOS FIJOS
+================================================================================
+
+  Sistema operativo (todas las VMs):
+    Usuario:    ubuntu
+    Contraseña: ubuntu123
+
+  PostgreSQL:
+    Usuario BD:      admin
+    Contraseña BD:   admin123
+    Base de datos:   image_processing
+    Puerto:          5432
+
+  RabbitMQ (en VM-API):
+    Usuario:    guest
+    Contraseña: guest
+    Puerto:     5672
+
+  API (usuario de prueba):
+    Correo:     admin@test.com
+    Contraseña: 1234
+    Puerto API: 8000
+
+================================================================================

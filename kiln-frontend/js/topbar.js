@@ -16,7 +16,7 @@ export function mountTopbar(active) {
         <span>Kiln</span>
       </a>
       <nav class="nav">
-        <a href="forge.html" data-key="forge">Forge</a>
+        <a href="forge.html" data-key="forge">Forjar</a>
         <a href="lotes.html" data-key="lotes">Lotes</a>
         <a href="info.html" data-key="info">Docs</a>
       </nav>

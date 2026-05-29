@@ -211,6 +211,82 @@ class PersistenceService:
 
     # ---------------------------------------------- resultado_procesamiento
 
+    # ----------------------------------------------------------- métricas
+
+    def obtener_metricas_sistema(self) -> dict:
+        with get_cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM lote_procesamiento")
+            total_lotes = cur.fetchone()["count"]
+
+            cur.execute("""
+                SELECT el.nombre, COUNT(*) AS cantidad
+                FROM lote_procesamiento lp
+                JOIN estado_lote el ON lp.id_estado_lote = el.id_estado_lote
+                GROUP BY el.nombre
+            """)
+            lotes_por_estado = {r["nombre"]: r["cantidad"] for r in cur.fetchall()}
+
+            cur.execute("SELECT COUNT(*) FROM imagen")
+            total_imagenes = cur.fetchone()["count"]
+
+            cur.execute("""
+                SELECT et.nombre, COUNT(*) AS cantidad
+                FROM imagen i
+                JOIN estado_tarea et ON i.id_estado_tarea = et.id_estado_tarea
+                GROUP BY et.nombre
+            """)
+            imagenes_por_estado = {r["nombre"]: r["cantidad"] for r in cur.fetchall()}
+
+            cur.execute("""
+                SELECT id_nodo, hostname, capacidad
+                FROM nodo_worker WHERE id_estado_nodo = 1
+            """)
+            workers = [dict(r) for r in cur.fetchall()]
+
+        return {
+            "total_lotes": total_lotes,
+            "lotes_por_estado": lotes_por_estado,
+            "total_imagenes": total_imagenes,
+            "imagenes_por_estado": imagenes_por_estado,
+            "workers_activos": workers,
+        }
+
+    def obtener_metricas_lote(self, id_lote: str) -> dict:
+        with get_cursor() as cur:
+            cur.execute("""
+                SELECT
+                    i.nombre_archivo, i.formato, i.resolucion,
+                    et.nombre AS estado, t.id_nodo,
+                    EXTRACT(EPOCH FROM (r.fecha_generacion - t.fecha_asignacion))
+                        AS tiempo_segundos
+                FROM imagen i
+                JOIN estado_tarea et ON i.id_estado_tarea = et.id_estado_tarea
+                LEFT JOIN tarea_procesamiento t ON t.id_imagen = i.id_imagen
+                LEFT JOIN resultado_procesamiento r ON r.id_tarea = t.id_tarea
+                WHERE i.id_lote = %s
+                ORDER BY i.nombre_archivo
+            """, (id_lote,))
+            imagenes = [dict(r) for r in cur.fetchall()]
+
+            cur.execute("""
+                SELECT i.nombre_archivo, COUNT(it.id_imagen_transformacion) AS num
+                FROM imagen i
+                LEFT JOIN imagen_transformacion it ON it.id_imagen = i.id_imagen
+                WHERE i.id_lote = %s
+                GROUP BY i.id_imagen, i.nombre_archivo
+            """, (id_lote,))
+            trans_counts = {r["nombre_archivo"]: r["num"] for r in cur.fetchall()}
+
+            cur.execute("""
+                SELECT MIN(t.fecha_asignacion) AS inicio, MAX(r.fecha_generacion) AS fin
+                FROM tarea_procesamiento t
+                JOIN resultado_procesamiento r ON r.id_tarea = t.id_tarea
+                WHERE t.id_lote = %s
+            """, (id_lote,))
+            tiempos = dict(cur.fetchone())
+
+        return {"imagenes": imagenes, "trans_counts": trans_counts, "tiempos": tiempos}
+
     def insertar_resultado(self, id_tarea: int, ruta_salida: str | None, estado: str) -> None:
         with get_cursor() as cur:
             cur.execute(

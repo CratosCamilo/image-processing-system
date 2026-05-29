@@ -1,0 +1,10 @@
+**/__pycache__
+**/*.pyc
+**/*.pyo
+.git
+.gitignore
+api/storage/input/
+api/storage/output/
+*.zip
+kiln-frontend/
+scripts/reporte_*.txt

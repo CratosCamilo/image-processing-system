@@ -1,0 +1,523 @@
+================================================================================
+  GUÍA COMPLETA DE DEPLOY EN VMs — SISTEMA DE PROCESAMIENTO DE IMÁGENES
+================================================================================
+
+LECTURA OBLIGATORIA ANTES DE EMPEZAR
+-------------------------------------
+El orden de este documento es el orden real que debes seguir.
+No crees ninguna VM sin haber creado primero todos los discos virtuales.
+Anota las IPs en papel o en un bloc de notas — las necesitarás entre pasos.
+
+RESUMEN DE LO QUE TENDRÁS AL FINAL
+------------------------------------
+  vm-api      → FastAPI (puerto 8000) + RabbitMQ
+  vm-db       → PostgreSQL
+  vm-worker-1 → Worker (2 hilos)
+  vm-worker-2 → Worker (2 hilos) — clon de vm-worker-1
+
+
+================================================================================
+  PARTE 1 — CREAR LOS DISCOS DUROS VIRTUALES (ANTES DE CUALQUIER VM)
+================================================================================
+
+Los VHDs (Virtual Hard Disks) son archivos .vdi que representan el disco duro
+de cada VM. Se crean una sola vez y se guardan todos en la carpeta:
+
+  image-processing-system\discos-virtuales\
+
+Los VHDs tienen tamaño dinámico: el archivo crece hasta el límite según se use,
+no ocupa ese espacio desde el principio.
+
+---
+
+OPCIÓN A — VirtualBox GUI (más visual)
+----------------------------------------
+1. Abre VirtualBox
+2. Menú superior: File → Tools → Virtual Media Manager
+   (en versiones antiguas: File → Virtual Media Manager)
+3. Pestaña "Hard Disks" → botón "Create" (arriba a la izquierda)
+4. Sigue el asistente:
+   - Hard disk file type: VDI (VirtualBox Disk Image) → Next
+   - Storage on physical hard disk: Dynamically allocated → Next
+   - File location and size:
+       * Haz clic en el ícono de carpeta y navega a:
+         image-processing-system\discos-virtuales\
+       * Nombre del archivo: vhd-api
+       * Tamaño: 20,00 GB → Next → Create
+
+5. Repite para los otros dos:
+   - Nombre: vhd-db     → Tamaño: 10,00 GB
+   - Nombre: vhd-worker → Tamaño: 10,00 GB
+
+Al terminar debes ver 3 archivos en la carpeta discos-virtuales\:
+  vhd-api.vdi     (~unos pocos MB de tamaño real por ahora)
+  vhd-db.vdi
+  vhd-worker.vdi
+
+---
+
+OPCIÓN B — PowerShell con VBoxManage (lo que quizás mencionó el profesor)
+---------------------------------------------------------------------------
+Abre PowerShell y ejecuta estos 3 comandos (ajusta la ruta si tu proyecto
+está en otra ubicación):
+
+$BASE = "C:\Users\USUARIO PC\Documents\Universidad\2026-1\Sistemas Distribuidos\image-processing-system\discos-virtuales"
+$VBM  = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
+
+& $VBM createmedium disk --filename "$BASE\vhd-api.vdi"    --size 20480 --format VDI --variant Standard
+& $VBM createmedium disk --filename "$BASE\vhd-db.vdi"     --size 10240 --format VDI --variant Standard
+& $VBM createmedium disk --filename "$BASE\vhd-worker.vdi" --size 10240 --format VDI --variant Standard
+
+(Si VBoxManage no está en esa ruta, búscalo con: Get-Command VBoxManage)
+
+
+================================================================================
+  PARTE 2 — CONFIGURACIÓN GENERAL DE CADA VM EN VIRTUALBOX
+================================================================================
+
+NOTA COMÚN PARA TODAS LAS VMs:
+  - Tipo (Type): Linux
+  - Versión (Version): Ubuntu (64-bit)
+  - Adaptador de red: Bridged Adapter (explicado en cada VM)
+  - NO marcar "Enable EFI" salvo que el instalador lo requiera
+  - Disco duro: "Use an existing virtual hard disk file" → navegar al .vdi
+
+Cuando el asistente de creación de VM pregunte por el disco duro,
+selecciona "Use an existing virtual hard disk file" (NO crear uno nuevo)
+y elige el .vdi correspondiente de la carpeta discos-virtuales\.
+
+
+================================================================================
+  PARTE 3 — CREAR E INSTALAR VM-DB (PostgreSQL)
+================================================================================
+
+PASO 3.1 — Crear la VM en VirtualBox
+--------------------------------------
+New → crea nueva VM con estos valores:
+
+  Name:             vm-db
+  Machine Folder:   (donde quieras guardar la configuración, no el disco)
+  Type:             Linux
+  Version:          Ubuntu (64-bit)
+  Memory (RAM):     2048 MB  (2 GB)
+  Processors (CPU): 2
+  Hard disk:        "Use an existing virtual hard disk file"
+                    → seleccionar: discos-virtuales\vhd-db.vdi
+
+Después de crear la VM, antes de arrancarla:
+  Settings → Network → Adapter 1:
+    - Enable Network Adapter: ✓
+    - Attached to: Bridged Adapter
+    - Name: (selecciona tu tarjeta de red real — la que usas para internet)
+
+Settings → Display:
+    - Video Memory: 16 MB es suficiente (servidor sin interfaz gráfica)
+
+PASO 3.2 — Instalar Ubuntu Server
+-----------------------------------
+Monta el ISO:
+  Settings → Storage → Controller: IDE → Empty (ícono CD)
+  → "Choose a disk file" → selecciona ubuntu-22.04-live-server-amd64.iso
+
+Inicia la VM. Verás el instalador de Ubuntu Server. Sigue estas pantallas:
+
+  PANTALLA: Language
+    → English  (recomendado para fácil copypaste de comandos)
+
+  PANTALLA: Installer update available
+    → "Continue without updating"  (ahorra tiempo)
+
+  PANTALLA: Keyboard configuration
+    → Layout: Spanish (o el que uses)
+    → Variant: Spanish  → Done
+
+  PANTALLA: Choose type of install
+    → Ubuntu Server (ya viene marcado) → Done
+
+  PANTALLA: Network connections
+    → Verás una interfaz con una IP asignada por DHCP (ej. 192.168.x.x)
+    → No toques nada → Done
+    → ANOTA esa IP en un papel — es la IP de VM-DB
+
+  PANTALLA: Configure proxy
+    → Dejar en blanco → Done
+
+  PANTALLA: Configure Ubuntu archive mirror
+    → Dejar el mirror por defecto → Done
+
+  PANTALLA: Guided storage configuration
+    → "Use an entire disk" (ya marcado) ✓
+    → DESMARCAR "Set up this disk as an LVM group" (desactívalo para simplificar)
+    → Done
+
+  PANTALLA: Storage configuration (resumen del layout)
+    → Done → Aparece "Confirm destructive action" → Continue
+
+  PANTALLA: Profile configuration  ← IMPORTANTE, anota estos valores
+    Your name:          ubuntu           (puede ser cualquier cosa)
+    Your server's name: vm-db            (EXACTO, sin espacios)
+    Username:           ubuntu           (IMPORTANTE: usar exactamente "ubuntu")
+    Password:           ubuntu123        (o la que prefieras, ANÓTALA)
+    Confirm password:   ubuntu123
+
+  PANTALLA: Upgrade to Ubuntu Pro
+    → "Skip for now" → Continue
+
+  PANTALLA: SSH Setup   ← MUY IMPORTANTE
+    → "Install OpenSSH server" ✓ (ACTIVA ESTA OPCIÓN)
+    → "Import SSH identity": No → Done
+
+  PANTALLA: Featured server snaps
+    → No selecciones nada → Done
+
+  Ahora instala (tarda 5-10 minutos).
+  Cuando termine: "Reboot Now" → Enter
+  Si pide "Remove the installation medium" simplemente presiona Enter
+  (VirtualBox lo desmonta automáticamente).
+
+PASO 3.3 — Primer arranque y verificar IP
+-------------------------------------------
+Cuando arranque verás el login. Entra con:
+  login: ubuntu
+  password: ubuntu123
+
+Luego ejecuta:
+  ip addr
+  (o: hostname -I)
+
+Busca la IP en la interfaz "enp0s3" o similar. Ejemplo: 192.168.1.105
+ANOTA: IP-VM-DB = 192.168.1.105  ← reemplaza con el valor real
+
+PASO 3.4 — Copiar y ejecutar el script de configuración
+---------------------------------------------------------
+Desde tu PC (PowerShell), copia el script a la VM:
+
+  scp "C:\Users\USUARIO PC\Documents\Universidad\2026-1\Sistemas Distribuidos\image-processing-system\scripts\deploy\setup_db.sh" ubuntu@<IP-VM-DB>:~/
+
+Luego en la VM:
+  bash ~/setup_db.sh
+
+El script instala PostgreSQL, crea el usuario admin y la base de datos,
+y habilita el acceso remoto. Al final muestra la IP de la VM — confiérmala.
+
+
+================================================================================
+  PARTE 4 — CREAR E INSTALAR VM-API (FastAPI + RabbitMQ)
+================================================================================
+
+PASO 4.1 — Crear la VM en VirtualBox
+--------------------------------------
+  Name:             vm-api
+  Type:             Linux
+  Version:          Ubuntu (64-bit)
+  Memory (RAM):     2048 MB
+  Processors (CPU): 2
+  Hard disk:        discos-virtuales\vhd-api.vdi
+
+  Settings → Network → Adapter 1 → Bridged Adapter → (tu tarjeta de red)
+
+PASO 4.2 — Instalar Ubuntu Server
+-----------------------------------
+Mismo proceso que VM-DB. Diferencias:
+
+  PANTALLA: Profile configuration
+    Your server's name: vm-api           ← DIFERENTE
+    Username:           ubuntu
+    Password:           ubuntu123
+
+  (Todo lo demás igual, especialmente: instalar OpenSSH server ✓)
+
+Después de reiniciar, anota la IP:
+  ANOTA: IP-VM-API = 192.168.1.xxx
+
+PASO 4.3 — Copiar el código del proyecto a la VM
+--------------------------------------------------
+Desde PowerShell en tu PC:
+
+  scp -r "C:\Users\USUARIO PC\Documents\Universidad\2026-1\Sistemas Distribuidos\image-processing-system" ubuntu@<IP-VM-API>:~/image-processing-system
+
+(Esto copia todo el proyecto. Tarda un par de minutos dependiendo del tamaño.)
+
+PASO 4.4 — Crear y editar el archivo de variables de entorno
+--------------------------------------------------------------
+Desde PowerShell, copia el ejemplo:
+
+  scp "C:\Users\USUARIO PC\Documents\Universidad\2026-1\Sistemas Distribuidos\image-processing-system\scripts\deploy\.env.api.example" ubuntu@<IP-VM-API>:~/.env.api
+
+Luego entra a la VM y edítalo:
+  ssh ubuntu@<IP-VM-API>
+  nano ~/.env.api
+
+Reemplaza <IP-VM-DB> con la IP real de VM-DB. Ejemplo:
+  DATABASE_URL=postgresql://admin:admin123@192.168.1.105:5432/image_processing
+  SECRET_KEY=mi-clave-secreta-jwt-cambiar-en-produccion
+
+Guarda con: Ctrl+O → Enter → Ctrl+X
+
+PASO 4.5 — Ejecutar el script de configuración
+------------------------------------------------
+En la VM (ya dentro via SSH o en la consola de VirtualBox):
+
+  bash ~/image-processing-system/scripts/deploy/setup_api.sh
+
+El script instala Python, RabbitMQ (nativo), NFS server, crea el venv,
+instala dependencias y registra el servicio systemd de la API.
+
+Al terminar, verifica:
+  curl http://localhost:8000/info
+
+Deberías recibir el JSON con las transformaciones disponibles.
+
+
+================================================================================
+  PARTE 5 — CREAR E INSTALAR VM-WORKER-1
+================================================================================
+
+PASO 5.1 — Crear la VM en VirtualBox
+--------------------------------------
+  Name:             vm-worker-1
+  Type:             Linux
+  Version:          Ubuntu (64-bit)
+  Memory (RAM):     2048 MB
+  Processors (CPU): 2
+  Hard disk:        discos-virtuales\vhd-worker.vdi
+
+  Settings → Network → Adapter 1 → Bridged Adapter
+
+PASO 5.2 — Instalar Ubuntu Server
+-----------------------------------
+Mismo proceso. Diferencias:
+
+  PANTALLA: Profile configuration
+    Your server's name: vm-worker-1      ← DIFERENTE
+    Username:           ubuntu
+    Password:           ubuntu123
+
+  (Instalar OpenSSH server ✓)
+
+Anota la IP:
+  ANOTA: IP-VM-WORKER-1 = 192.168.1.xxx
+
+PASO 5.3 — Copiar el código y el archivo .env
+----------------------------------------------
+Desde PowerShell:
+
+  scp -r "C:\Users\USUARIO PC\Documents\Universidad\2026-1\Sistemas Distribuidos\image-processing-system" ubuntu@<IP-VM-WORKER-1>:~/image-processing-system
+
+  scp "C:\Users\USUARIO PC\Documents\Universidad\2026-1\Sistemas Distribuidos\image-processing-system\scripts\deploy\.env.worker.example" ubuntu@<IP-VM-WORKER-1>:~/.env.worker
+
+Luego edita el .env:
+  ssh ubuntu@<IP-VM-WORKER-1>
+  nano ~/.env.worker
+
+Reemplaza las IPs reales. Ejemplo:
+  DATABASE_URL=postgresql://admin:admin123@192.168.1.105:5432/image_processing
+  RABBITMQ_HOST=192.168.1.110
+  N_WORKERS=2
+
+PASO 5.4 — Ejecutar el script de configuración
+------------------------------------------------
+  bash ~/image-processing-system/scripts/deploy/setup_worker.sh
+
+El script instala Python, monta el NFS desde VM-API, instala dependencias
+y registra el servicio systemd del worker.
+
+Verifica:
+  journalctl -u worker -n 20
+  (debes ver "[Worker:vm-worker-1-...] Iniciando con 2 hilos")
+
+
+================================================================================
+  PARTE 6 — CREAR VM-WORKER-2 (CLONAR VHD)
+================================================================================
+
+IMPORTANTE: vm-worker-1 debe estar APAGADA antes de clonar.
+
+Apaga vm-worker-1:
+  sudo shutdown -h now
+  (o desde VirtualBox: Machine → ACPI Shutdown)
+
+PASO 6.1 — Clonar la VM en VirtualBox
+---------------------------------------
+En VirtualBox, selecciona vm-worker-1 → Machine → Clone (o clic derecho → Clone)
+
+  New machine name:  vm-worker-2
+  Path:              (donde VirtualBox guarda las configuraciones)
+  MAC Address Policy: "Generate new MAC addresses for all network adapters"
+                      ← MUY IMPORTANTE, marca esta opción
+
+  Clone type: Full clone  ← importante para tener un disco independiente
+  → Clone
+
+Esto crea vm-worker-2 con su propio VHD separado (se guarda donde VirtualBox
+guarda los VHDs, no en tu carpeta discos-virtuales — esto es normal para clones).
+
+PASO 6.2 — Cambiar el hostname de vm-worker-2
+-----------------------------------------------
+Enciende vm-worker-2 y entra a la consola. Luego:
+
+  sudo hostnamectl set-hostname vm-worker-2
+  sudo sed -i 's/vm-worker-1/vm-worker-2/g' /etc/hosts
+  sudo reboot
+
+Después del reinicio, confirma:
+  hostname
+  (debe mostrar: vm-worker-2)
+
+PASO 6.3 — Volver a encender vm-worker-1
+-----------------------------------------
+Enciende vm-worker-1. Ambos workers deberían conectarse a RabbitMQ y empezar
+a consumir mensajes. Cada uno tiene un WORKER_ID único (hostname + UUID).
+
+
+================================================================================
+  PARTE 7 — VERIFICACIÓN FINAL DEL SISTEMA
+================================================================================
+
+Orden de arranque (SIEMPRE en este orden):
+  1. vm-db      → espera ~10s a que PostgreSQL esté listo
+  2. vm-api     → la API inicializa el schema en PostgreSQL al arrancar
+  3. vm-worker-1 y vm-worker-2 → pueden arrancar en cualquier orden
+
+Desde tu PC (PowerShell):
+
+  # 1. Verificar que la API responde
+  curl http://<IP-VM-API>:8000/info
+
+  # 2. Login y obtener token
+  $respuesta = Invoke-RestMethod -Uri "http://<IP-VM-API>:8000/auth/login" `
+    -Method POST `
+    -ContentType "application/json" `
+    -Body '{"correo":"admin@test.com","password":"1234"}'
+  $TOKEN = $respuesta.access_token
+  echo $TOKEN
+
+  # 3. Enviar un batch de prueba (desde la carpeta del proyecto)
+  cd "C:\Users\USUARIO PC\Documents\Universidad\2026-1\Sistemas Distribuidos\image-processing-system"
+  python scripts/generarbatch.py 3
+  # Esto genera lote.zip
+
+  # 4. Subir el batch
+  curl -X POST http://<IP-VM-API>:8000/lote `
+    -H "Authorization: Bearer $TOKEN" `
+    -F "archivos=@lote.zip"
+
+  # 5. Stress test completo (necesita el token en el script)
+  python scripts/stress_test.py --url http://<IP-VM-API>:8000
+
+Verificación en cada VM:
+  # Estado del servicio
+  systemctl status api       (en vm-api)
+  systemctl status worker    (en vm-worker-1 y vm-worker-2)
+
+  # Logs en vivo
+  journalctl -u api -f       (en vm-api)
+  journalctl -u worker -f    (en workers)
+
+  # Verificar NFS montado
+  df -h | grep storage       (en workers — debe mostrar el mount NFS)
+
+
+================================================================================
+  PARTE 8 — LLEVAR LAS VMs A LA UNIVERSIDAD
+================================================================================
+
+Los archivos que debes llevar:
+  1. Los 3 VHDs de discos-virtuales\:
+       vhd-api.vdi
+       vhd-db.vdi
+       vhd-worker.vdi
+  2. El VHD del clon vm-worker-2 (VirtualBox lo guarda en su carpeta,
+     búscalo con: File → Tools → Virtual Media Manager)
+  3. El ISO de Ubuntu Server (por si necesitas reinstalar algo)
+
+En la universidad, con VirtualBox instalado:
+  - File → Tools → Virtual Media Manager → Add → selecciona cada .vdi
+  - Crea las VMs nuevamente con "Use an existing virtual hard disk file"
+    apuntando a cada .vdi (no reinstales Ubuntu, el SO ya está dentro)
+
+IMPORTANTE — las IPs cambian en otra red:
+  Cuando conectes las VMs a la red de la universidad, cada VM obtendrá
+  una IP diferente de la que tenía en casa. Deberás:
+  1. Arrancar cada VM y ver su nueva IP con: hostname -I
+  2. Actualizar ~/.env.api en vm-api (IP de vm-db)
+  3. Actualizar ~/.env.worker en ambos workers (IPs de vm-db y vm-api)
+  4. Actualizar /etc/fstab en ambos workers (IP de vm-api para NFS)
+     y re-montar con: sudo umount -l ~/image-processing-system/api/storage
+                      sudo mount -a
+  5. Reiniciar los servicios:
+     sudo systemctl restart api     (en vm-api)
+     sudo systemctl restart worker  (en ambos workers)
+
+Tip: si prefieres no repetir esto cada vez, considera asignar IPs estáticas
+fijas en cada VM (pregúntame si llegamos a ese punto).
+
+
+================================================================================
+  REFERENCIA RÁPIDA — COMANDOS ÚTILES EN LAS VMs
+================================================================================
+
+  # Ver IP de la VM
+  hostname -I
+
+  # Ver logs del servicio en vivo
+  journalctl -u api -f
+  journalctl -u worker -f
+
+  # Reiniciar un servicio
+  sudo systemctl restart api
+  sudo systemctl restart worker
+
+  # Ver estado
+  systemctl status api
+  systemctl status worker
+
+  # Editar variables de entorno (y luego restart)
+  nano ~/.env.api
+  nano ~/.env.worker
+
+  # Ver si el NFS está montado (en workers)
+  df -h | grep storage
+  mountpoint ~/image-processing-system/api/storage
+
+  # Ver procesos PostgreSQL (en vm-db)
+  sudo -u postgres psql -c "\l"    # listar bases de datos
+  sudo -u postgres psql -c "\du"   # listar usuarios
+
+  # Estado de RabbitMQ (en vm-api)
+  sudo rabbitmqctl status
+  sudo rabbitmqctl list_queues
+
+
+================================================================================
+  RESUMEN DE CREDENCIALES Y DATOS A ANOTAR
+================================================================================
+
+  Sistema operativo de cada VM:
+    Usuario: ubuntu
+    Contraseña: ubuntu123
+
+  PostgreSQL (en vm-db):
+    Usuario BD: admin
+    Contraseña BD: admin123
+    Base de datos: image_processing
+    Puerto: 5432
+
+  RabbitMQ (en vm-api):
+    Usuario: guest
+    Contraseña: guest
+    Puerto: 5672
+
+  API (aplicación):
+    Usuario de prueba: admin@test.com
+    Contraseña: 1234
+    Puerto API: 8000
+
+  IPs (llenar cuando las tengas):
+    IP-VM-DB:       _________________
+    IP-VM-API:      _________________
+    IP-VM-WORKER-1: _________________
+    IP-VM-WORKER-2: _________________
+
+
+================================================================================

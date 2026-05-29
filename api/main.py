@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from routes.auth import router as auth_router
 from routes.lote import router as lote_router
+from routes.metricas import router as metricas_router
 from services.rabbitmq_service import conectar
 
 
@@ -49,3 +50,4 @@ app.add_middleware(
 
 app.include_router(auth_router)
 app.include_router(lote_router)
+app.include_router(metricas_router)

@@ -1,0 +1,16 @@
+[Unit]
+Description=Image Processing Worker (pika + Pillow)
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/image-processing-system/worker
+EnvironmentFile=/home/ubuntu/.env.worker
+ExecStart=/home/ubuntu/image-processing-system/worker/venv/bin/python worker.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

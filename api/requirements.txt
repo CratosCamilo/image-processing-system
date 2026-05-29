@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+aio-pika
+psycopg2-binary
+Pillow
+python-jose[cryptography]
+passlib[bcrypt]
+bcrypt<4.0
+python-multipart
+psutil

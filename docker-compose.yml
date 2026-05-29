@@ -1,0 +1,79 @@
+services:
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin123
+      POSTGRES_DB: image_processing
+    ports:
+      - "5432:5432"      # expuesto al host → dev (cmd) sigue usando localhost:5432
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d image_processing"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - "5672:5672"      # AMQP — expuesto al host → dev (cmd) sigue usando localhost:5672
+      - "15672:15672"    # UI de administración → http://localhost:15672 (guest/guest)
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    container_name: api-img
+    ports:
+      - "8000:8000"      # expuesto al host y al modem → acceso desde la uni
+    environment:
+      DATABASE_URL: postgresql://admin:admin123@postgres:5432/image_processing
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq/
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - storage:/app/api/storage
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/info')\" || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://admin:admin123@postgres:5432/image_processing
+      RABBITMQ_HOST: rabbitmq
+      N_WORKERS: 4
+      PYTHONUNBUFFERED: "1"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    volumes:
+      - storage:/app/api/storage
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  storage:

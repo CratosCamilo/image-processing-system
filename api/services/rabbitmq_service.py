@@ -1,9 +1,10 @@
 import json
+import os
 
 import aio_pika
 from aio_pika.abc import AbstractRobustConnection
 
-RABBITMQ_URL = "amqp://guest:guest@localhost/"
+RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost/")
 QUEUE_NAME = "cola_imagenes"
 
 

@@ -8,7 +8,7 @@ const LS_USER = "kiln:user";
 const LS_BASE = "kiln:api_base";
 const LS_LOTES = "kiln:lotes";
 
-const DEFAULT_BASE = "http://localhost:8000";
+const DEFAULT_BASE = "https://stagnant-copious-oblivion.ngrok-free.dev";
 
 export const api = {
   getBase() {
@@ -69,6 +69,7 @@ export const api = {
     const token = this.getToken();
     const finalHeaders = { ...headers };
     if (token) finalHeaders["Authorization"] = `Bearer ${token}`;
+    finalHeaders["ngrok-skip-browser-warning"] = "true";
 
     let res;
     try {
@@ -107,7 +108,7 @@ export const api = {
   async login(correo, password) {
     const res = await fetch(this.getBase() + "/auth/login", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "ngrok-skip-browser-warning": "true" },
       body: JSON.stringify({ correo, password }),
     }).catch((err) => {
       throw new ApiError(0, `No se pudo contactar el API en ${this.getBase()}`, err);
